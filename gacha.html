@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#0e1220">
+<title>魔方抽卡模拟器</title>
+<style>
+:root{
+  --bg:#0e1220;
+  --bg2:#151a2e;
+  --card:#1c2338;
+  --card2:#232b45;
+  --line:rgba(255,255,255,.09);
+  --txt:#eef2ff;
+  --dim:#9aa7c7;
+  --gold:#ffd25e;
+  --cubeA:#6ad6ff; --cubeB:#7a5cff;
+  --coinA:#ffd76e; --coinB:#ff9a2e;
+  --fragA:#ff8fb1; --fragB:#c74bff;
+  --resA:#8ff0c0; --resB:#2fa36b;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  background:
+    radial-gradient(1100px 620px at 12% -8%, #2b3a7a55 0%, transparent 62%),
+    radial-gradient(900px 560px at 108% 8%, #7a2b6a4d 0%, transparent 60%),
+    linear-gradient(180deg,var(--bg) 0%,var(--bg2) 100%);
+  background-attachment:fixed;
+  color:var(--txt);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Helvetica Neue",Arial,sans-serif;
+  min-height:100vh;
+  padding:18px 14px 34px;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:760px;margin:0 auto}
+
+/* ============ 顶部资源栏 ============ */
+.header{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  margin-bottom:14px;
+}
+.title{display:flex;align-items:center;gap:9px}
+.title .logo{width:34px;height:34px;flex:0 0 auto}
+.title h1{font-size:17px;margin:0;font-weight:700;letter-spacing:.5px}
+.title p{margin:2px 0 0;font-size:11px;color:var(--dim)}
+
+.wallet{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:8px;
+  background:linear-gradient(160deg,#1d2540,#171d31);
+  border:1px solid var(--line);border-radius:16px;padding:10px 10px 11px;
+  box-shadow:0 10px 26px #0006;
+}
+.wcell{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0}
+.wcell svg{width:26px;height:26px}
+.wnum{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.wlab{font-size:10px;color:var(--dim);letter-spacing:.5px}
+.wcell.flash .wnum{color:var(--gold);text-shadow:0 0 12px #ffd25e88}
+.wcell .bump{animation:bump .45s ease}
+@keyframes bump{0%{transform:scale(1)}35%{transform:scale(1.22)}100%{transform:scale(1)}}
+
+.pullcount{
+  margin:10px 0 0;text-align:center;font-size:11px;color:var(--dim);
+  letter-spacing:.6px
+}
+.pullcount b{color:var(--txt);font-variant-numeric:tabular-nums}
+
+/* ============ 抽卡区 ============ */
+.stage{
+  position:relative;margin-top:14px;border-radius:20px;overflow:hidden;
+  border:1px solid var(--line);
+  background:linear-gradient(180deg,#1b2237,#141a2c);
+  box-shadow:0 14px 34px #0007, inset 0 1px 0 #ffffff0f;
+  min-height:260px;
+  display:flex;flex-direction:column;
+}
+.stage::before{
+  content:"";position:absolute;inset:-40% -10% auto -10%;height:70%;
+  background:radial-gradient(closest-side,#ffffff14,transparent 70%);
+  pointer-events:none;
+}
+.stage-head{
+  position:relative;display:flex;align-items:center;justify-content:space-between;
+  padding:12px 14px 8px;font-size:12px;color:var(--dim)
+}
+.stage-head .sum{color:var(--txt);font-weight:600}
+.grid{
+  position:relative;padding:4px 10px 14px;
+  display:grid;grid-template-columns:repeat(5,1fr);gap:8px;
+  align-content:start;
+}
+.grid.big{max-height:none}
+@media (max-width:420px){ .grid{gap:6px;padding:4px 8px 12px} }
+
+.slot{
+  position:relative;border-radius:13px;padding:7px 4px 6px;
+  display:flex;flex-direction:column;align-items:center;gap:3px;
+  background:#242c47;border:1px solid var(--line);
+  transform:scale(.72);opacity:0;
+  animation:pop .34s cubic-bezier(.2,1.5,.5,1) forwards;
+  min-width:0;
+}
+@keyframes pop{to{transform:scale(1);opacity:1}}
+.slot svg{width:30px;height:30px;flex:0 0 auto}
+.slot .amt{font-size:11.5px;font-weight:700;line-height:1.05;font-variant-numeric:tabular-nums}
+.slot .nm{font-size:8.5px;color:#cdd6ef;opacity:.85;letter-spacing:.2px}
+.slot.t0{background:linear-gradient(165deg,#3d2a63,#241a3d);border-color:#b06bff88;box-shadow:0 0 0 1px #b06bff33,0 6px 16px #b06bff2e}
+.slot.t1{background:linear-gradient(165deg,#4a2f57,#2a1a35);border-color:#ff8fb188;box-shadow:0 0 0 1px #ff8fb133,0 6px 16px #ff8fb12b}
+.slot.t2{background:linear-gradient(165deg,#5a4620,#33280f);border-color:#ffd25e99;box-shadow:0 0 0 1px #ffd25e33,0 6px 16px #ffd25e33}
+.slot.t3{background:linear-gradient(165deg,#1f3f52,#152a38);border-color:#6ad6ff77}
+.slot.t4{background:linear-gradient(165deg,#26314f,#1b2237)}
+.slot .amt.gold{color:var(--gold)}
+.slot .amt.blue{color:#9fe4ff}
+.slot .amt.pink{color:#ffb0c8}
+.slot .amt.green{color:#9df0c4}
+
+/* 结果图导出用容器（不可见，仅构建 canvas 用） */
+#pngHost{position:fixed;left:-99999px;top:0}
+
+/* ============ 按钮 ============ */
+.actions{display:grid;grid-template-columns:1fr 1fr 2fr;gap:9px;margin-top:14px}
+button{
+  font-family:inherit;border:0;border-radius:15px;color:#fff;font-weight:700;
+  padding:14px 8px;font-size:15px;letter-spacing:.5px;
+  cursor:pointer;position:relative;overflow:hidden;
+  transition:transform .12s ease, filter .2s ease, opacity .2s;
+  box-shadow:0 8px 20px #0006, inset 0 1px 0 #ffffff26;
+}
+button:active{transform:translateY(1px) scale(.985)}
+button:disabled{opacity:.45;filter:grayscale(.5)}
+#b1{background:linear-gradient(180deg,#3d67d4,#27408f);font-size:14px}
+#b5{background:linear-gradient(180deg,#6a49d8,#42298f);font-size:14px}
+#b50{background:linear-gradient(180deg,#ffb63c,#e5711b);color:#2a1600;font-size:16px}
+#b50 small{display:block;font-size:10px;font-weight:600;opacity:.75;margin-top:2px}
+.grid.has{display:grid}
+
+.util{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-top:10px}
+.util button{
+  background:#232b45;border:1px solid var(--line);color:#cdd6ef;
+  font-size:12.5px;font-weight:600;padding:11px 6px;box-shadow:none
+}
+.util button.warn{color:#ffb3b3}
+
+/* ============ 概率表 ============ */
+.panel{
+  margin-top:16px;background:linear-gradient(180deg,#1b2237,#151a2b);
+  border:1px solid var(--line);border-radius:16px;overflow:hidden;
+}
+.panel > summary{
+  list-style:none;cursor:pointer;padding:13px 14px;font-size:13px;font-weight:700;
+  display:flex;align-items:center;justify-content:space-between;color:var(--txt)
+}
+.panel > summary::-webkit-details-marker{display:none}
+.panel > summary .hint{font-size:11px;color:var(--dim);font-weight:500}
+.ptable{width:100%;border-collapse:collapse;font-size:12px}
+.ptable th,.ptable td{padding:8px 12px;text-align:left;border-top:1px solid var(--line);white-space:nowrap}
+.ptable th{color:var(--dim);font-weight:600;font-size:11px}
+.ptable td:first-child{width:38%}
+.ptable .p{text-align:right;color:var(--gold);font-variant-numeric:tabular-nums;font-weight:600}
+.ptable i{display:inline-flex;vertical-align:middle;margin-right:6px}
+.ptable i svg{width:20px;height:20px;display:block}
+.bar{height:5px;border-radius:3px;background:#ffffff14;overflow:hidden;margin-top:4px}
+.bar span{display:block;height:100%;background:linear-gradient(90deg,#6ad6ff,#7a5cff)}
+
+.tip{margin:14px 2px 0;font-size:11px;color:#8b96b5;line-height:1.7;text-align:center}
+.hidden{display:none!important}
+
+/* 大奖横幅 */
+.banner{
+  margin:0 10px 8px;padding:9px 12px;border-radius:12px;font-size:12px;font-weight:700;
+  background:linear-gradient(90deg,#b06bff33,#ffd25e22);border:1px solid #b06bff55;
+  color:#f0e6ff;display:flex;align-items:center;gap:8px;
+  animation:pop .3s ease both;
+}
+.banner svg{width:22px;height:22px;flex:0 0 auto}
+
+/* 分享弹层 */
+.mask{
+  position:fixed;inset:0;background:#05070fcc;backdrop-filter:blur(4px);
+  display:flex;align-items:flex-end;justify-content:center;z-index:99;padding:0
+}
+@media(min-width:520px){.mask{align-items:center}}
+.sheet{
+  width:100%;max-width:560px;background:linear-gradient(180deg,#212942,#181d30);
+  border:1px solid var(--line);border-radius:20px 20px 0 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom));
+  animation:up .26s ease both
+}
+@media(min-width:520px){.sheet{border-radius:20px}}
+@keyframes up{from{transform:translateY(22px);opacity:.4}to{transform:none;opacity:1}}
+.sheet h3{margin:0 0 6px;font-size:15px}
+.sheet p{margin:0 0 12px;font-size:12px;color:var(--dim);line-height:1.6}
+.linkbox{
+  display:flex;gap:8px;align-items:center;background:#141a2c;border:1px solid var(--line);
+  border-radius:12px;padding:9px 10px;margin-bottom:12px
+}
+.linkbox input{
+  flex:1;min-width:0;background:none;border:0;color:#cdd6ef;font-size:11.5px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;outline:none
+}
+.sheet .row{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.sheet button{padding:12px 8px;font-size:13.5px}
+.ghost{background:#2a3350;border:1px solid var(--line);box-shadow:none;color:#cdd6ef}
+.toast{
+  position:fixed;left:50%;top:56px;transform:translateX(-50%);
+  background:#0b0f1ceb;border:1px solid var(--line);color:var(--txt);
+  padding:10px 16px;border-radius:999px;font-size:12.5px;z-index:200;
+  animation:pop .2s ease both;max-width:86vw;text-align:center
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="header">
+    <div class="title">
+      <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><use href="#i-cube" xlink:href="#i-cube"></use></svg>
+      <div>
+        <h1>魔方抽卡模拟器</h1>
+        <p>单抽 · 5连 · 50连 · 概率公示</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="wallet">
+    <div class="wcell" id="w-cube">
+      <svg viewBox="0 0 64 64"><use href="#i-cube" xlink:href="#i-cube"></use></svg>
+      <div class="wnum" id="n-cube">0</div><div class="wlab">魔方</div>
+    </div>
+    <div class="wcell" id="w-coin">
+      <svg viewBox="0 0 64 64"><use href="#i-coin" xlink:href="#i-coin"></use></svg>
+      <div class="wnum" id="n-coin">0</div><div class="wlab">代币</div>
+    </div>
+    <div class="wcell" id="w-frag">
+      <svg viewBox="0 0 64 64"><use href="#i-frag" xlink:href="#i-frag"></use></svg>
+      <div class="wnum" id="n-frag">0</div><div class="wlab">碎片</div>
+    </div>
+    <div class="wcell" id="w-res">
+      <svg viewBox="0 0 64 64"><use href="#i-res" xlink:href="#i-res"></use></svg>
+      <div class="wnum" id="n-res">0</div><div class="wlab">资源</div>
+    </div>
+  </div>
+  <div class="pullcount">累计抽卡 <b id="n-pulls">0</b> 次 · 本机自动保存</div>
+
+  <div class="stage">
+    <div class="stage-head">
+      <span id="stageTitle">点击下方按钮开始抽卡</span>
+      <span class="sum" id="stageSummary"></span>
+    </div>
+    <div id="bannerHost"></div>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <div class="actions">
+    <button id="b1">单抽</button>
+    <button id="b5">5 连</button>
+    <button id="b50">50 连<small>速抽 · 自动汇总</small></button>
+  </div>
+  <div class="util">
+    <button id="bShare">分享结果</button>
+    <button id="bSave">保存结果图</button>
+    <button id="bReset" class="warn">清空记录</button>
+  </div>
+
+  <details class="panel">
+    <summary>概率公示 <span class="hint">点击展开 / 收起</span></summary>
+    <table class="ptable">
+      <thead><tr><th>奖励</th><th style="text-align:right">概率</th><th>千次期望</th></tr></thead>
+      <tbody id="ptbody"></tbody>
+    </table>
+  </details>
+
+  <p class="tip">本模拟器纯娱乐，所有图标由程序绘制，与任何官方游戏无关。<br>数据仅保存在你自己的手机浏览器里。</p>
+</div>
+
+<!-- ================= 图标库（矢量自绘） ================= -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="gCube" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8fe8ff"/><stop offset="1" stop-color="#6a4bff"/>
+    </linearGradient>
+    <linearGradient id="gCube2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#63c8ff"/><stop offset="1" stop-color="#3d2bb8"/>
+    </linearGradient>
+    <linearGradient id="gCoin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe89a"/><stop offset=".55" stop-color="#ffc23c"/><stop offset="1" stop-color="#e4860f"/>
+    </linearGradient>
+    <linearGradient id="gCoin2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff3c4"/><stop offset="1" stop-color="#f0a01e"/>
+    </linearGradient>
+    <linearGradient id="gFrag" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffc0d8"/><stop offset="1" stop-color="#b32bff"/>
+    </linearGradient>
+    <linearGradient id="gRes" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b6ffd9"/><stop offset="1" stop-color="#22a06b"/>
+    </linearGradient>
+
+    <!-- 魔方：3D 立方体 -->
+    <symbol id="i-cube" viewBox="0 0 64 64">
+      <polygon points="32,5 56,18.5 32,32 8,18.5" fill="url(#gCube)"/>
+      <polygon points="8,18.5 32,32 32,59 8,45.5" fill="url(#gCube2)"/>
+      <polygon points="56,18.5 56,45.5 32,59 32,32" fill="#2f1f7a"/>
+      <polygon points="32,10.5 50,20.6 32,30.7 14,20.6" fill="#ffffff" opacity=".22"/>
+      <g stroke="#ffffff" stroke-opacity=".55" stroke-width="1.1" fill="none">
+        <path d="M20,14.6 L44,14.6 M20,14.6 L20,38.9 M44,14.6 L44,38.9 M20,38.9 L44,38.9"/>
+      </g>
+      <g fill="#ffe98a">
+        <circle cx="27" cy="17.6" r="1.9"/><circle cx="32" cy="20.4" r="1.9"/><circle cx="37" cy="17.6" r="1.9"/>
+      </g>
+      <circle cx="24" cy="25" r="4" fill="#fff" opacity=".5"/>
+    </symbol>
+
+    <!-- 代币：金币 -->
+    <symbol id="i-coin" viewBox="0 0 64 64">
+      <ellipse cx="32" cy="54" rx="17" ry="4.2" fill="#000" opacity=".28"/>
+      <circle cx="32" cy="30" r="24" fill="#a9620a"/>
+      <circle cx="32" cy="28" r="22" fill="url(#gCoin)"/>
+      <circle cx="32" cy="28" r="17.5" fill="#ffe9a6" opacity=".55"/>
+      <circle cx="32" cy="28" r="15" fill="url(#gCoin2)" stroke="#c47a08" stroke-width="1.6"/>
+      <text x="32" y="36.5" text-anchor="middle" font-family="Arial Black,Arial,sans-serif"
+            font-size="20" font-weight="900" fill="#a35c04">T</text>
+      <ellipse cx="24" cy="17.5" rx="7" ry="4.6" fill="#fff" opacity=".6" transform="rotate(-26 24 17.5)"/>
+    </symbol>
+
+    <!-- 碎片：宝石碎块 -->
+    <symbol id="i-frag" viewBox="0 0 64 64">
+      <polygon points="32,4 52,20 42,58 22,58 12,20" fill="url(#gFrag)"/>
+      <polygon points="32,4 12,20 22,58 32,36" fill="#ffffff" opacity=".2"/>
+      <polygon points="32,4 52,20 42,58 32,36" fill="#000000" opacity=".18"/>
+      <polygon points="20,17 44,17 38,44 26,44" fill="#ffffff" opacity=".32"/>
+      <polygon points="24,21 32,9 40,21" fill="#fff" opacity=".75"/>
+      <path d="M22,58 L42,58" stroke="#ffffff" stroke-opacity=".5" stroke-width="2" stroke-linecap="round"/>
+      <circle cx="27" cy="27" r="2.6" fill="#fff" opacity=".85"/>
+    </symbol>
+
+    <!-- 资源：能量水晶 -->
+    <symbol id="i-res" viewBox="0 0 64 64">
+      <polygon points="32,3 59,32 32,61 5,32" fill="url(#gRes)"/>
+      <polygon points="32,3 5,32 32,61" fill="#ffffff" opacity=".22"/>
+      <polygon points="32,3 59,32 32,61" fill="#000000" opacity=".22"/>
+      <polygon points="32,11 51,32 32,53 13,32" fill="#eafff5" opacity=".55"/>
+      <polygon points="32,18 44,32 32,46 20,32" fill="#ffffff" opacity=".85"/>
+      <polygon points="32,24 38,32 32,40 26,32" fill="#2fa36b" opacity=".55"/>
+      <circle cx="22" cy="22" r="2.4" fill="#fff" opacity=".9"/>
+    </symbol>
+  </defs>
+</svg>
+
+<script>
+(function(){
+'use strict';
+
+/* =========================================================
+   1. 概率表（严格按需求）
+   ========================================================= */
+var PRIZE_TYPES = {
+  cube:{ name:'魔方',  cls:'cube', icon:'i-cube' },
+  coin:{ name:'代币',  cls:'coin', icon:'i-coin' },
+  frag:{ name:'碎片',  cls:'frag', icon:'i-frag' },
+  res :{ name:'资源',  cls:'res',  icon:'i-res'  }
+};
+
+// p 为权重（万分之几 → 这里直接写百分比数值，总和 100）
+var TABLE = [
+  { key:'cube3', type:'cube', amount:3,   p:0.01,  tier:0, v:900 },
+  { key:'frag2', type:'frag', amount:2,   p:2,     tier:1, v:160 },
+  { key:'cube2', type:'cube', amount:2,   p:0.04,  tier:0, v:600 },
+  { key:'cube1', type:'cube', amount:1,   p:0.2,   tier:2, v:300 },
+  { key:'coin400',type:'coin',amount:400, p:0.6,   tier:2, v:400 },
+  { key:'coin240',type:'coin',amount:240, p:1,     tier:2, v:240 },
+  { key:'coin50', type:'coin',amount:50,  p:4.2,   tier:3, v:50  },
+  { key:'coin24', type:'coin',amount:24,  p:8.9,   tier:3, v:24  },
+  { key:'coin10', type:'coin',amount:10,  p:20,    tier:4, v:10  },
+  { key:'coin5',  type:'coin',amount:5,   p:43.05, tier:4, v:5   },
+  { key:'res1',  type:'res',  amount:1,   p:1,     tier:4, v:1   }
+];
+/* 上面 10 项显式概率之和 = 99%，所以"剩下概率 1 资源" = 100% - 99% = 1%。
+   这里把 res1 的 p 当作占位值，用万分位整数反算残差，既保留"剩下的都归 1 资源"
+   的语义，又避免浮点误差。 */
+var RESIDUAL_KEYS = ['res1'];
+(function fixResidual(){
+  var w = 0, i;
+  for (i=0;i<TABLE.length;i++){
+    if (RESIDUAL_KEYS.indexOf(TABLE[i].key) < 0) w += Math.round(TABLE[i].p*100);
+  }
+  var resW = 10000 - w;                        // 残差（万分位）= 100 → 1%
+  for (i=0;i<TABLE.length;i++){
+    if (RESIDUAL_KEYS.indexOf(TABLE[i].key) >= 0) TABLE[i].p = resW/100;
+  }
+})();
+
+/* =========================================================
+   2. 状态与持久化（微信内 file:// / 隐私模式均有降级）
+   ========================================================= */
+var STORE_KEY = 'cube_gacha_v1';
+var state = { cube:0, coin:0, frag:0, res:0, pulls:0, last:null };
+
+var mem = {};
+var store = {
+  get:function(k){
+    try{ if(window.localStorage){ var v = window.localStorage.getItem(k); if(v!==null) return v; } }catch(e){}
+    return mem[k]===undefined?null:mem[k];
+  },
+  set:function(k,v){
+    mem[k]=v;
+    try{ if(window.localStorage) window.localStorage.setItem(k,v); }catch(e){}
+  },
+  del:function(k){
+    delete mem[k];
+    try{ if(window.localStorage) window.localStorage.removeItem(k); }catch(e){}
+  }
+};
+
+function save(){
+  store.set(STORE_KEY, JSON.stringify({
+    cube:state.cube, coin:state.coin, frag:state.frag, res:state.res, pulls:state.pulls
+  }));
+}
+function load(){
+  var raw = store.get(STORE_KEY);
+  if(!raw) return false;
+  try{
+    var o = JSON.parse(raw);
+    state.cube = num(o.cube); state.coin = num(o.coin);
+    state.frag = num(o.frag); state.res = num(o.res); state.pulls = num(o.pulls);
+    return true;
+  }catch(e){ return false; }
+}
+function num(v){ v = Number(v); return isFinite(v)&&v>0 ? Math.floor(v) : 0; }
+
+/* =========================================================
+   3. 抽卡核心
+   ========================================================= */
+var CUM = [], acc = 0;
+TABLE.forEach(function(t){ acc += t.p; CUM.push(acc); });
+var SUM_P = CUM[CUM.length-1];
+
+function rollOnce(){
+  var r = Math.random()*SUM_P;
+  for (var i=0;i<CUM.length;i++){ if(r < CUM[i]) return TABLE[i]; }
+  return TABLE[TABLE.length-1];
+}
+
+function applyPrize(p){
+  if(p.type==='cube') state.cube += p.amount;
+  else if(p.type==='coin') state.coin += p.amount;
+  else if(p.type==='frag') state.frag += p.amount;
+  else state.res += p.amount;
+}
+
+/** 批量抽 n 次，返回明细 + 汇总 */
+function draw(n){
+  var list = [], gained = { cube:0, coin:0, frag:0, res:0 }, best = null, bestIdx = 9999;
+  for (var i=0;i<n;i++){
+    var p = rollOnce();
+    applyPrize(p);
+    gained[p.type] += p.amount;
+    list.push(p);
+    var idx = TABLE.indexOf(p);
+    if (idx < bestIdx){ bestIdx = idx; best = p; }
+  }
+  state.pulls += n;
+  var result = {
+    n:n, list:list, gained:gained, best:best,
+    total:{ cube:state.cube, coin:state.coin, frag:state.frag, res:state.res, pulls:state.pulls }
+  };
+  state.last = result;
+  save();
+  return result;
+}
+
+/* =========================================================
+   4. 渲染
+   ========================================================= */
+var $ = function(id){ return document.getElementById(id); };
+var grid = $('grid');
+
+function svgIcon(sym, size){
+  /* 同时输出 href / xlink:href，兼容微信内较旧的 WebView 内核 */
+  return '<svg viewBox="0 0 64 64" xmlns:xlink="http://www.w3.org/1999/xlink"'+
+         (size?' style="width:'+size+'px;height:'+size+'px"':'')+
+         '><use href="#'+sym+'" xlink:href="#'+sym+'"></use></svg>';
+}
+function fmt(n){
+  n = Math.round(n);
+  if (n < 10000) return String(n);
+  if (n < 100000000){
+    var w = n/10000;
+    return (w>=100? w.toFixed(0): w.toFixed(w>=10?1:2))+'万';
+  }
+  return (n/100000000).toFixed(2)+'亿';
+}
+function full(n){ return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
+var walletEls = {
+  cube:{ cell:$('w-cube'), num:$('n-cube') },
+  coin:{ cell:$('w-coin'), num:$('n-coin') },
+  frag:{ cell:$('w-frag'), num:$('n-frag') },
+  res :{ cell:$('w-res'),  num:$('n-res')  }
+};
+
+function renderWallet(flashTypes){
+  ['cube','coin','frag','res'].forEach(function(t){
+    var el = walletEls[t];
+    var v = state[t];
+    el.num.textContent = fmt(v);
+    el.num.setAttribute('title', full(v));
+    if (flashTypes && flashTypes.indexOf(t) >= 0){
+      el.cell.classList.add('flash');
+      el.num.classList.remove('bump');
+      /* 触发重排以重放动画 */
+      void el.num.offsetWidth;
+      el.num.classList.add('bump');
+      setTimeout((function(c){ return function(){ c.classList.remove('flash'); }; })(el.cell), 700);
+    }
+  });
+  $('n-pulls').textContent = full(state.pulls);
+}
+
+function slotHTML(p, idx){
+  var t = PRIZE_TYPES[p.type];
+  var amtCls = p.tier===0||p.tier===2 ? 'gold' : (p.tier===1 ? 'pink' : (p.type==='cube' ? 'blue' : (p.type==='res'?'green':'')));
+  var delay = Math.min(idx*16, 620);
+  var label = (p.amount>1 ? '×'+p.amount : '');
+  return '<div class="slot t'+p.tier+'" style="animation-delay:'+delay+'ms">'+
+           svgIcon(t.icon)+
+           '<div class="amt '+amtCls+'">'+p.amount+'</div>'+
+           '<div class="nm">'+t.name+label+'</div>'+
+         '</div>';
+}
+
+function summaryText(g){
+  var parts = [];
+  if(g.cube) parts.push('魔方+'+g.cube);
+  if(g.coin) parts.push('代币+'+g.coin);
+  if(g.frag) parts.push('碎片+'+g.frag);
+  if(g.res)  parts.push('资源+'+g.res);
+  return parts.length? parts.join(' · ') : '—';
+}
+
+function renderResult(r, compact){
+  var list = r.list;
+  if (compact && list.length > 10){
+    /* 50 连：按奖励种类合并展示，更清爽 */
+    var byKey = {}, order = [];
+    list.forEach(function(p){
+      if(!byKey[p.key]){ byKey[p.key] = { p:p, c:0 }; order.push(p.key); }
+      byKey[p.key].c++;
+    });
+    order.sort(function(a,b){ return TABLE.indexOf(byKey[a].p) - TABLE.indexOf(byKey[b].p); });
+    grid.innerHTML = order.map(function(k, i){
+      var o = byKey[k], p = o.p, t = PRIZE_TYPES[p.type];
+      var delay = Math.min(i*45, 700);
+      return '<div class="slot t'+p.tier+'" style="animation-delay:'+delay+'ms">'+
+               svgIcon(t.icon)+
+               '<div class="amt">×'+o.c+'</div>'+
+               '<div class="nm">'+t.name+'×'+p.amount+'</div>'+
+             '</div>';
+    }).join('');
+    grid.style.gridTemplateColumns = 'repeat(5,1fr)';
+  } else {
+    grid.innerHTML = list.map(slotHTML).join('');
+    grid.style.gridTemplateColumns = list.length>5 ? 'repeat(5,1fr)' : ('repeat('+Math.max(list.length,1)+',1fr)');
+  }
+
+  /* 大奖横幅 */
+  var host = $('bannerHost');
+  var t0 = r.best;
+  if (t0 && (t0.tier===0 || t0.tier===1)){
+    var tt = PRIZE_TYPES[t0.type];
+    var txt = t0.tier===0
+      ? ('🎉 恭喜获得 ' + tt.name + ' ×' + t0.amount + '（' + t0.p + '% 稀有奖励）')
+      : ('✨ 获得 ' + tt.name + ' ×' + t0.amount + '（' + t0.p + '%）');
+    host.innerHTML = '<div class="banner">'+svgIcon(tt.icon)+'<span>'+txt+'</span></div>';
+  } else {
+    host.innerHTML = '';
+  }
+
+  $('stageTitle').textContent = r.n>1 ? (r.n + ' 连抽结果') : '单抽结果';
+  $('stageSummary').textContent = '本次获得：' + summaryText(r.gained);
+}
+
+/* =========================================================
+   5. 交互
+   ========================================================= */
+var busy = false;
+function withBusy(fn){
+  if (busy) return;
+  busy = true;
+  ['b1','b5','b50'].forEach(function(id){ $(id).disabled = true; });
+  try{ fn(); }finally{
+    busy = false;
+    ['b1','b5','b50'].forEach(function(id){ $(id).disabled = false; });
+  }
+}
+
+function doDraw(n){
+  withBusy(function(){
+    var r = draw(n);
+    renderResult(r, n>10);
+    var flash = [];
+    ['cube','coin','frag','res'].forEach(function(t){ if(r.gained[t]) flash.push(t); });
+    renderWallet(flash);
+    if (n <= 5) buzz(12);
+    else if (r.best && r.best.tier<=1) buzz([18,40,18]);
+  });
+}
+
+/* 轻微震动（微信 iOS 多数支持，不支持则静默忽略） */
+function buzz(pattern){
+  try{ if (navigator.vibrate) navigator.vibrate(pattern); }catch(e){}
+}
+
+$('b1').addEventListener('click', function(){ doDraw(1); });
+$('b5').addEventListener('click', function(){ doDraw(5); });
+$('b50').addEventListener('click', function(){ doDraw(50); });
+
+$('bReset').addEventListener('click', function(){
+  if (!window.confirm('确定清空所有抽卡记录与资源统计？')) return;
+  state = { cube:0, coin:0, frag:0, res:0, pulls:0, last:null };
+  store.del(STORE_KEY);
+  grid.innerHTML = '';
+  $('bannerHost').innerHTML = '';
+  $('stageTitle').textContent = '点击下方按钮开始抽卡';
+  $('stageSummary').textContent = '';
+  renderWallet(null);
+  toast('已清空');
+});
+
+/* =========================================================
+   6. 结果图（Canvas 绘制，可直接长按保存/转发微信）
+   ========================================================= */
+function wrapText(ctx, text, maxW){
+  var out = [], line = '';
+  for (var i=0;i<text.length;i++){
+    var ch = text[i];
+    if (ctx.measureText(line+ch).width > maxW && line){ out.push(line); line = ch; }
+    else line += ch;
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+function renderResultPng(){
+  if (!state.last){
+    toast('先抽一次卡再保存哦');
+    return;
+  }
+  var r = state.last, dpr = 2;
+  var W = 720, pad = 30, lineH = 30;
+  var canvas = document.createElement('canvas');
+  var ctx = canvas.getContext('2d');
+  ctx.font = '15px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+
+  var headY = 150;
+  var sumText = summaryText(r.gained);
+  var sumLines = wrapText(ctx, '本次获得：' + sumText, W - pad*2);
+  var statLines = [];
+  var kinds = [];
+  if (r.gained.cube) kinds.push(['魔方', r.gained.cube]);
+  if (r.gained.coin) kinds.push(['代币', r.gained.coin]);
+  if (r.gained.frag) kinds.push(['碎片', r.gained.frag]);
+  if (r.gained.res)  kinds.push(['资源', r.gained.res]);
+  statLines.push(kinds.map(function(k){ return k[0]+' +'+full(k[1]); }).join('    '));
+  statLines.push('累计：魔方 '+full(state.cube)+'   代币 '+full(state.coin)+'   碎片 '+full(state.frag)+'   资源 '+full(state.res));
+  statLines.push('累计抽卡 '+full(state.pulls)+' 次');
+  var statWrapped = [];
+  statLines.forEach(function(s){ statWrapped = statWrapped.concat(wrapText(ctx, s, W-pad*2)); });
+
+  /* 展示条数：50 连汇总条数即种类数，其它最多展示全部 */
+  var items;
+  if (r.n > 10){
+    var byKey = {}, order = [];
+    r.list.forEach(function(p){
+      if(!byKey[p.key]){ byKey[p.key] = { p:p, c:0 }; order.push(p.key); }
+      byKey[p.key].c++;
+    });
+    order.sort(function(a,b){ return TABLE.indexOf(byKey[a].p) - TABLE.indexOf(byKey[b].p); });
+    items = order.map(function(k){ return { p:byKey[k].p, c:byKey[k].c }; });
+  } else {
+    items = r.list.map(function(p){ return { p:p, c:1 }; });
+  }
+
+  /* 网格尺寸（先算好总高度，避免卡片与底部说明文字重叠） */
+  var cols = 5, colGap = 10, cellW = (W - pad*2 - (cols-1)*colGap)/cols, cellH = 96;
+  var rows = Math.ceil(items.length/cols);
+  var gridH = rows*cellH + (rows-1)*colGap;
+  var footH = 74;                                       // 底部概率说明占位（2 行）
+  var gridTop = headY + sumLines.length*lineH + 16 + statWrapped.length*22 + 22;
+  var H = gridTop + gridH + footH;
+
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  canvas.style.width = W+'px'; canvas.style.height = H+'px';
+  ctx.scale(dpr,dpr);
+
+  /* 背景 */
+  var bg = ctx.createLinearGradient(0,0,W,H);
+  bg.addColorStop(0,'#141a2c'); bg.addColorStop(1,'#0d1120');
+  ctx.fillStyle = bg; ctx.fillRect(0,0,W,H);
+  var glow = ctx.createRadialGradient(90,20,10,90,20,420);
+  glow.addColorStop(0,'rgba(122,92,255,.35)'); glow.addColorStop(1,'rgba(122,92,255,0)');
+  ctx.fillStyle = glow; ctx.fillRect(0,0,W,420);
+
+  var y = 62;
+  ctx.fillStyle = '#eef2ff'; ctx.font = 'bold 30px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillText('魔方抽卡模拟器', pad, y);
+  y += 34;
+  ctx.font = '17px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = '#9aa7c7';
+  ctx.fillText((r.n>1? r.n+' 连抽结果':'单抽结果'), pad, y);
+  y = headY - 22;
+
+  /* 分隔线 */
+  ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad,y); ctx.lineTo(W-pad,y); ctx.stroke();
+
+  y = headY + 6;
+  ctx.font = 'bold 18px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = '#ffd25e';
+  sumLines.forEach(function(l){ ctx.fillText(l, pad, y); y += lineH; });
+  y += 14;
+  ctx.font = '15px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = '#cdd6ef';
+  statWrapped.forEach(function(l){ ctx.fillText(l, pad, y); y += 22; });
+  y += 20;
+
+  /* 卡片网格：从 gridTop 开始绘制（与上面算高度时的取值保持一致） */
+  items.forEach(function(it, i){
+    var col = i % cols, row = Math.floor(i/cols);
+    var x = pad + col*(cellW+colGap), cy = gridTop + row*(cellH+colGap);
+    var t = PRIZE_TYPES[it.p.type];
+    var pal = palette(it.p.tier, t.cls);
+    roundRect(ctx, x, cy, cellW, cellH, 14);
+    var g = ctx.createLinearGradient(x, cy, x+cellW, cy+cellH);
+    g.addColorStop(0, pal[0]); g.addColorStop(1, pal[1]);
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = pal[2]; ctx.lineWidth = 1.2; ctx.stroke();
+
+    ctx.textAlign = 'center';
+    /* 主数字：卡片上半部居中 */
+    ctx.font = 'bold 20px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = pal[3];
+    var amountTxt = it.c > 1 ? ('×'+it.c) : String(it.p.amount);
+    ctx.fillText(amountTxt, x+cellW/2, cy+cellH/2 + 2);
+    /* 名称：贴近卡片底部，与主数字保持足够间距 */
+    ctx.font = '12px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,.82)';
+    ctx.fillText(t.name + (it.c>1? '×'+it.p.amount : ''), x+cellW/2, cy+cellH-16);
+    ctx.textAlign = 'left';
+  });
+
+  /* 底部说明 */
+  ctx.textAlign = 'center';
+  ctx.font = '12px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = '#7b86a5';
+  ctx.fillText('概率公示：0.01% 3魔方 / 0.04% 2魔方 / 0.2% 1魔方 / 0.6% 400代币 / 1% 240代币', W/2, H-34);
+  ctx.fillText('4.2% 50代币 / 8.9% 24代币 / 20% 10代币 / 43.05% 5代币 / 2% 2碎片 / 其余 1资源', W/2, H-14);
+  ctx.textAlign = 'left';
+
+  return canvas;
+}
+
+function palette(tier, cls){
+  if (tier===0) return ['#4b2f7a','#241a3d','rgba(176,107,255,.6)','#e9d4ff'];
+  if (tier===1) return ['#5a3557','#2a1a35','rgba(255,143,177,.6)','#ffd7e4'];
+  if (tier===2) return ['#6b5220','#33280f','rgba(255,210,94,.65)','#ffefc2'];
+  if (tier===3) return ['#20455c','#152a38','rgba(106,214,255,.5)','#d8f4ff'];
+  return ['#28334f','#1b2237','rgba(255,255,255,.14)','#ffffff'];
+}
+
+function roundRect(ctx, x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+$('bSave').addEventListener('click', function(){
+  var canvas;
+  try{ canvas = renderResultPng(); }catch(e){ toast('生成图片失败，请直接截图分享'); return; }
+  var url;
+  try{ url = canvas.toDataURL('image/png'); }catch(e){ toast('当前环境不支持导出，请直接截图'); return; }
+
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = '抽卡结果_'+state.pulls+'抽.png';
+  document.body.appendChild(a);
+  try{ a.click(); }catch(e){}
+  document.body.removeChild(a);
+
+  showSheet(url);
+});
+
+/* =========================================================
+   7. 分享
+   ========================================================= */
+function buildShareUrl(){
+  var base = location.href.split('#')[0];
+  var s = [state.cube, state.coin, state.frag, state.res, state.pulls].join('.');
+  return base + '#s=' + s;
+}
+function readShareUrl(){
+  var m = /(?:^|#|&)s=([0-9.]+)/.exec(location.hash || '');
+  if (!m) return false;
+  var a = m[1].split('.').map(Number);
+  if (a.length < 5 || a.some(function(v){ return !isFinite(v)||v<0; })) return false;
+  state.cube=a[0]|0; state.coin=a[1]|0; state.frag=a[2]|0; state.res=a[3]|0; state.pulls=a[4]|0;
+  return true;
+}
+
+function copyText(txt, done){
+  var ok = false;
+  try{
+    var ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.setAttribute('readonly','');
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select(); ta.setSelectionRange(0, txt.length);
+    ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+  }catch(e){ ok = false; }
+  if (!ok && navigator.clipboard){
+    navigator.clipboard.writeText(txt).then(function(){ done(true); }, function(){ done(false); });
+    return;
+  }
+  done(ok);
+}
+
+$('bShare').addEventListener('click', function(){
+  var url = buildShareUrl();
+  copyText(url, function(ok){
+    showSheet(null, url, ok);
+  });
+});
+
+function showSheet(imgUrl, link, copied){
+  var mask = document.createElement('div');
+  mask.className = 'mask';
+  var html = '<div class="sheet">';
+  if (imgUrl){
+    html += '<h3>结果图已生成</h3>'+
+            '<p>长按下方图片可“保存到相册”，或直接转发到微信。</p>'+
+            '<img src="'+imgUrl+'" style="width:100%;border-radius:14px;border:1px solid rgba(255,255,255,.12);margin-bottom:12px">';
+  } else {
+    html += '<h3>'+(copied? '链接已复制 ✅':'请手动复制下方链接')+'</h3>'+
+            '<p>链接里带有你当前的资源与抽卡次数，好友打开即可看到同一份战绩。</p>'+
+            '<div class="linkbox"><input readonly value="'+String(link).replace(/"/g,'&quot;')+'"></div>';
+  }
+  html += '<div class="row"><button class="ghost" id="sheetClose">关闭</button>'+
+          (imgUrl
+            ? '<button id="sheetLink">复制分享链接</button>'
+            : '<button id="sheetCopy">再复制一次</button>')+
+          '</div></div>';
+  mask.innerHTML = html;
+  document.body.appendChild(mask);
+  mask.addEventListener('click', function(e){ if(e.target===mask) document.body.removeChild(mask); });
+  $('sheetClose').addEventListener('click', function(){ document.body.removeChild(mask); });
+  if (imgUrl){
+    $('sheetLink').addEventListener('click', function(){
+      var u = buildShareUrl();
+      copyText(u, function(ok){ toast(ok? '分享链接已复制':'复制失败，请长按链接选择复制'); });
+    });
+  } else {
+    var inp = mask.querySelector('input');
+    $('sheetCopy').addEventListener('click', function(){
+      try{ inp.select(); inp.setSelectionRange(0, inp.value.length); }catch(e){}
+      copyText(inp.value, function(ok){ toast(ok? '已复制':'请长按输入框手动复制'); });
+    });
+  }
+}
+
+var toastTimer = null;
+function toast(msg){
+  var old = document.querySelector('.toast');
+  if (old) old.parentNode.removeChild(old);
+  var d = document.createElement('div');
+  d.className = 'toast'; d.textContent = msg;
+  document.body.appendChild(d);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function(){ if(d.parentNode) d.parentNode.removeChild(d); }, 1900);
+}
+
+/* =========================================================
+   8. 概率表渲染
+   ========================================================= */
+(function renderTable(){
+  var tb = $('ptbody'), html = '';
+  var sorted = TABLE.slice().sort(function(a,b){ return a.p - b.p; });   // 稀有在上
+  sorted.forEach(function(p){
+    var t = PRIZE_TYPES[p.type];
+    /* 概率跨度 0.01%~43.05%，线性画条会全部看不见，这里用对数刻度 */
+    var w = Math.max(4, Math.log(p.p/0.01 + 1) / Math.log(43.05/0.01 + 1) * 100);
+    html += '<tr>'+
+      '<td><i>'+svgIcon(t.icon)+'</i>'+t.name+' ×'+p.amount+'</td>'+
+      '<td class="p">'+p.p+'%<div class="bar"><span style="width:'+w.toFixed(1)+'%"></span></div></td>'+
+      '<td style="color:#9aa7c7">'+ (p.p*10).toFixed(2).replace(/\.00$/,'') +' 个</td>'+
+    '</tr>';
+  });
+  var sum = TABLE.reduce(function(s,p){ return s+p.p; }, 0);
+  html += '<tr><td style="color:#9aa7c7">合计</td><td class="p">'+sum.toFixed(2)+'%</td><td></td></tr>';
+  tb.innerHTML = html;
+})();
+
+/* =========================================================
+   9. 启动
+   ========================================================= */
+(function boot(){
+  var fromLink = readShareUrl();
+  var fromStore = load();
+  // 链接快照优先展示，但随后仍以本机存档为准继续累加
+  if (fromStore && !fromLink) { /* 正常读档 */ }
+  renderWallet(null);
+  if (fromLink){
+    toast('已载入分享的战绩，可继续抽卡');
+  } else if (fromStore && state.pulls>0){
+    $('stageTitle').textContent = '欢迎回来';
+    $('stageSummary').textContent = '累计已有 '+full(state.pulls)+' 抽';
+  }
+  if (fromLink) save();
+})();
+
+})();
+</script>
+</body>
+</html>
