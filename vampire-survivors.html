@@ -1,0 +1,4565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="theme-color" content="#07070d" />
+<title>血夜幸存者 · 无限地图</title>
+<!--
+  ============================================================================
+  血夜幸存者（Vampire Survivors 风格）— 单文件 HTML5 游戏，电脑 / 手机通用
+  ----------------------------------------------------------------------------
+  需求实现索引：
+   1. 无限地图循环      -> 哈希无缝平铺地形 + 无边界世界坐标（可无限行走）
+   2. 升级经验公式      -> xpNeeded(level) = 6 + 6*Lv + 0.7*Lv^2（平滑递增）
+   3. 经验球/金币/道具吸附 -> 进入拾取半径后加速飞向主角（越近越快）
+   4. 升级选取技能      -> 升级弹出 3 选 1 卡牌（技能效果为占位符，易替换）
+   5. 局外升级系统      -> localStorage 永久金币 + 永久属性商店（占位符条目）
+   6. 每 3 分钟精英     -> 180s 刷精英（高血高攻）；1200s 清屏并生成 Boss
+                            Boss 拥有：扇形弹幕 / 环形弹幕 / 冲锋突进 / 召唤小怪
+   7. 怪物移速 0.8 倍   -> 敌人速度 = 主角基准速度 * 0.8 * 类型系数；血量随时间增长
+   8. 精英掉落          -> 掉落「技能卡」与「Hex Tech 改造」（占位符）
+   9. 操作              -> 电脑 WASD/方向键；手机半透明虚拟摇杆（触屏任意位置起摇）
+  10. HUD               -> 左上：生命/经验/冷却条 + 等级；右上：计时 + 小地图
+                            小地图仅显示一定范围内的精英、其掉落物与道具
+  11. 道具              -> 磁铁（吸取全场经验）/ 怀表（凝滞全场敌人 10s）/ 炸药（清视野）
+  12. 几何图形 + 粒子   -> 全部单位由几何图形绘制，含受击/死亡/拾取粒子
+  ============================================================================
+-->
+<style>
+  :root{
+    --hp:#ff4d6d; --hp2:#ff8fa3;
+    --xp:#4ea8ff; --xp2:#8fd3ff;
+    --cd:#ffd166;
+    --gold:#ffcf4d;
+    --panel:rgba(14,16,28,.86);
+    --line:rgba(130,160,255,.28);
+    /* 游戏画面（16:9 参考画面）在屏幕中的实际矩形，由 resize() 实时写入 */
+    --vx:0px; --vy:0px; --vw:100vw; --vh:100vh; --vbottom:0px; --vright:0px;
+  }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{
+    margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#07070d;
+    color:#e9ecf6; font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",sans-serif;
+    user-select:none; -webkit-user-select:none; touch-action:none; overscroll-behavior:none;
+  }
+  /* 画面等比缩放后居中显示：多余区域留黑边，保证「电脑版画面」在任何屏幕上完整可见 */
+  #game{
+    position:fixed; left:var(--vx); top:var(--vy);
+    width:var(--vw); height:var(--vh); display:block;
+  }
+
+  /* ---------------- HUD ---------------- */
+  .hud{ position:fixed; z-index:10; pointer-events:none; }
+
+  #hudLeft{ left:calc(var(--vx) + 10px); top:calc(var(--vy) + 10px); width:min(46vw,300px); }
+  .hrow{ display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+  .tag{
+    flex:0 0 34px; font-size:11px; letter-spacing:1px; color:#9fb0d8;
+    text-shadow:0 1px 2px #000;
+  }
+  .bar{
+    position:relative; flex:1; height:16px; border-radius:9px; overflow:hidden;
+    background:rgba(6,8,16,.72); border:1px solid var(--line);
+    box-shadow:inset 0 1px 3px rgba(0,0,0,.7);
+  }
+  .bar > i{ display:block; height:100%; width:0%; transition:width .12s linear; }
+  .bar > b{
+    position:absolute; inset:0; font-size:10.5px; font-weight:600; letter-spacing:.4px;
+    display:flex; align-items:center; justify-content:center; color:#fff;
+    text-shadow:0 1px 2px rgba(0,0,0,.95);
+  }
+  .bar.hp > i{ background:linear-gradient(90deg,#c81f45,var(--hp),var(--hp2)); }
+  .bar.xp{ height:12px; } .bar.xp > i{ background:linear-gradient(90deg,#1d5fb0,var(--xp),var(--xp2)); }
+  .bar.en{ height:14px; } .bar.en > i{ background:linear-gradient(90deg,#7a4bd0,#b98bff,#e6d6ff); }
+  .bar.en > b{ font-size:10px; }
+  /* 主动技能：充能点 */
+  .skillRow{ gap:8px; }
+  #chargeBox{ display:flex; gap:4px; flex:0 0 auto; align-items:center; }
+  .pip{
+    width:22px; height:11px; border-radius:3px; display:block;
+    background:rgba(255,255,255,.08); border:1px solid rgba(185,139,255,.45);
+    box-shadow:inset 0 0 6px rgba(0,0,0,.6);
+  }
+  .pip.on{ background:linear-gradient(180deg,#e6d6ff,#9b6bff); box-shadow:0 0 8px rgba(155,107,255,.8); }
+  #skillHint{
+    flex:1; min-width:0; text-align:right; font-size:10px; color:#a08fd0; letter-spacing:.3px;
+    text-shadow:0 1px 2px #000; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  #skillHint.inv{ color:#ffd166; font-weight:700; }
+  @media (max-width:560px){
+    #mini{ width:108px; height:108px; }
+    #timer{ font-size:19px; letter-spacing:1px; }
+    .bar{ height:14px; }
+    .bar > b{ font-size:9.5px; }
+    .pip{ width:17px; height:9px; }
+    .buff{ font-size:9px; padding:1px 4px; }
+  }
+
+  /* ================= 手机端适配 ================= */
+  @media (hover:none) and (pointer:coarse){
+    /* 需求：左上角数值不再显示（把屏幕让给画面） */
+    #hudLeft{ display:none !important; }
+    /* 右上角：暂停 / 2 倍速 换成更大的可点按钮，竖向排列 */
+    .hudBtns{ flex-direction:column; align-items:flex-end; gap:8px; }
+    .uiBtn.small{
+      padding:10px 14px; font-size:13px; border-radius:12px; font-weight:700;
+      min-width:112px; text-align:center; background:rgba(24,30,54,.9);
+      border-color:rgba(140,175,255,.5); box-shadow:0 4px 14px rgba(0,0,0,.5);
+    }
+    #mini{ width:104px; height:104px; }
+    #timer{ font-size:22px; letter-spacing:1px; }
+    .miniTip{ display:none; }
+    .toast{ font-size:11.5px; padding:5px 11px; }
+    /* 主动技能按钮：更大更好按 */
+    #btnSkill{ width:78px; height:78px; }
+    #btnFly, #btnCoin{ width:64px; height:64px; }
+  }
+  /* 竖屏时画面更扁，按钮与 HUD 缩小以免遮挡 */
+  @media (hover:none) and (pointer:coarse) and (orientation:portrait){
+    .uiBtn.small{ padding:8px 11px; font-size:12px; min-width:96px; }
+    #mini{ width:88px; height:88px; }
+    #timer{ font-size:18px; }
+    #btnSkill{ width:64px; height:64px; }
+    #btnFly, #btnCoin{ width:54px; height:54px; }
+    #btnFly{ right:calc(var(--vright) + 84px); }
+    #btnCoin{ right:calc(var(--vright) + 144px); }
+  }
+  /* 手机端技能按钮 */
+  #btnSkill{
+    position:fixed; right:calc(var(--vright) + 18px); bottom:calc(var(--vbottom) + 24px); z-index:20; width:74px; height:74px; border-radius:50%;
+    display:none; align-items:center; justify-content:center; flex-direction:column;
+    background:radial-gradient(circle at 35% 30%,rgba(196,160,255,.5),rgba(60,34,120,.72));
+    border:2px solid rgba(185,139,255,.75); color:#f0e8ff; font-family:inherit;
+    box-shadow:0 6px 22px rgba(0,0,0,.55), 0 0 18px rgba(155,107,255,.35);
+    pointer-events:auto; cursor:pointer; -webkit-user-select:none; user-select:none;
+  }
+  #btnSkill:active{ transform:scale(.94); }
+  #btnSkill.ready{ animation:skillPulse 1.6s ease-in-out infinite; }
+  @keyframes skillPulse{ 50%{ box-shadow:0 6px 22px rgba(0,0,0,.55), 0 0 26px rgba(185,139,255,.8); } }
+  #btnSkill.empty{ opacity:.42; filter:grayscale(.6); }
+  #btnSkill .ico{ font-size:22px; line-height:1; }
+  #btnSkill .num{ font-size:11px; font-weight:800; margin-top:2px; letter-spacing:1px; }
+  /* Hex 额外主动技能按钮 */
+  .miniBtn{
+    position:fixed; z-index:20; width:56px; height:56px; border-radius:50%;
+    display:none; align-items:center; justify-content:center; flex-direction:column;
+    background:radial-gradient(circle at 35% 30%,rgba(160,200,255,.45),rgba(24,40,86,.75));
+    border:2px solid rgba(130,190,255,.7); color:#eaf4ff; font-family:inherit;
+    box-shadow:0 5px 18px rgba(0,0,0,.5); pointer-events:auto; cursor:pointer;
+  }
+  #btnFly{ right:calc(var(--vright) + 102px); bottom:calc(var(--vbottom) + 30px); }
+  #btnCoin{ right:calc(var(--vright) + 170px); bottom:calc(var(--vbottom) + 30px); }
+  .miniBtn .ico{ font-size:18px; line-height:1; }
+  .miniBtn .num{ font-size:10px; font-weight:800; }
+  .miniBtn.empty{ opacity:.4; filter:grayscale(.6); }
+  @media (hover:none) and (pointer:coarse){ #btnSkill{ display:flex; } }
+  #lvBadge{
+    display:inline-block; margin-top:2px; padding:2px 9px; border-radius:20px; font-size:12px; font-weight:700;
+    background:rgba(20,24,44,.85); border:1px solid var(--line); color:#ffe9a8;
+    text-shadow:0 1px 2px #000;
+  }
+  .buffRow{ margin-top:5px; display:flex; flex-wrap:wrap; gap:4px; max-width:min(46vw,300px); max-height:58px; overflow:hidden; }
+  .buff{
+    font-size:10px; padding:1px 6px; border-radius:10px; color:#cfe0ff;
+    background:rgba(70,110,220,.22); border:1px solid rgba(110,150,255,.35);
+  }
+
+  #hudRight{ right:calc(var(--vright) + 10px); top:calc(var(--vy) + 10px); display:flex; flex-direction:column; align-items:flex-end; gap:5px; }
+  #timer{
+    font-size:26px; font-weight:800; letter-spacing:2px; color:#fff;
+    text-shadow:0 0 12px rgba(120,170,255,.75), 0 2px 4px #000; font-variant-numeric:tabular-nums;
+  }
+  #mini{
+    width:150px; height:150px; border-radius:50%;
+    filter:drop-shadow(0 3px 10px rgba(0,0,0,.65));
+  }
+  .miniTip{ font-size:10px; color:#8fa2cc; letter-spacing:.5px; text-shadow:0 1px 2px #000; }
+  #goldLine{ font-size:12px; color:var(--gold); font-weight:700; text-shadow:0 1px 3px #000; }
+  .hudBtns{ display:flex; gap:6px; pointer-events:auto; }
+  #btnSpeed.on{ background:linear-gradient(180deg,#ffe08a,#ffb733); color:#08111f; border-color:transparent; font-weight:800; }
+  .uiBtn{
+    pointer-events:auto; cursor:pointer; border:1px solid var(--line); color:#dfe7ff;
+    background:rgba(20,24,44,.8); border-radius:9px; font-size:12px; padding:5px 11px;
+    font-family:inherit; transition:background .15s, transform .08s;
+  }
+  .uiBtn:hover{ background:rgba(46,56,96,.92); }
+  .uiBtn:active{ transform:scale(.96); }
+  .uiBtn.small{ padding:3px 9px; font-size:11px; }
+
+  /* ---------------- 竖屏提示 ---------------- */
+  #rotateTip{
+    position:fixed; left:50%; transform:translateX(-50%); z-index:15;
+    padding:5px 13px; border-radius:20px; font-size:11.5px; color:#9fb0d8;
+    background:rgba(14,18,34,.82); border:1px solid var(--line); white-space:nowrap;
+    pointer-events:none; display:none;
+  }
+  #rotateTip.on{ display:block; }
+
+  /* ---------------- Boss 血条 ---------------- */
+  #bossWrap{
+    left:calc(var(--vx) + var(--vw) / 2); top:calc(var(--vy) + 8px); transform:translateX(-50%); width:min(70vw,620px);
+    opacity:0; transition:opacity .4s; text-align:center;
+  }
+  #bossWrap.on{ opacity:1; }
+  #bossName{
+    font-size:13px; font-weight:800; letter-spacing:3px; color:#ff9bb4;
+    text-shadow:0 0 10px rgba(255,60,110,.8), 0 2px 4px #000; margin-bottom:3px;
+  }
+  .bar.boss{ height:13px; } .bar.boss > i{ background:linear-gradient(90deg,#7a0d24,#ff2f6d,#ffb3c8); }
+
+  /* ---------------- 提示浮层 ---------------- */
+  #toasts{
+    position:fixed; left:calc(var(--vx) + var(--vw) / 2); bottom:calc(var(--vbottom) + 14vh); transform:translateX(-50%); z-index:30;
+    display:flex; flex-direction:column; align-items:center; gap:6px; pointer-events:none;
+  }
+  .toast{
+    padding:7px 14px; border-radius:20px; font-size:13px; font-weight:600; white-space:nowrap;
+    background:rgba(16,20,38,.9); border:1px solid var(--line); color:#e6edff;
+    box-shadow:0 6px 20px rgba(0,0,0,.5); animation:toastIn .28s ease both;
+  }
+  @keyframes toastIn{ from{ opacity:0; transform:translateY(12px) scale(.94); } to{ opacity:1; transform:none; } }
+  .toast.out{ animation:toastOut .4s ease both; }
+  @keyframes toastOut{ to{ opacity:0; transform:translateY(-14px); } }
+
+  /* ---------------- 弹窗页面 ---------------- */
+  .screen{
+    position:fixed; inset:0; z-index:40; display:none; align-items:center; justify-content:center;
+    background:radial-gradient(circle at 50% 40%,rgba(30,20,60,.72),rgba(4,4,10,.94));
+    backdrop-filter:blur(3px); padding:14px; overflow:auto;
+  }
+  .screen.on{ display:flex; }
+  .panel{
+    width:min(94vw,860px); max-height:92vh; overflow:auto; padding:18px 18px 20px;
+    background:var(--panel); border:1px solid var(--line); border-radius:16px;
+    box-shadow:0 20px 60px rgba(0,0,0,.7), inset 0 0 60px rgba(80,120,255,.06);
+  }
+  .title{
+    font-size:clamp(22px,5vw,34px); font-weight:900; letter-spacing:4px; text-align:center; margin:2px 0 4px;
+    background:linear-gradient(90deg,#ff6b8f,#ffd166,#7fd7ff);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    filter:drop-shadow(0 2px 10px rgba(255,80,120,.35));
+  }
+  .sub{ text-align:center; font-size:12px; color:#93a4cc; line-height:1.9; margin-bottom:14px; }
+  .sub b{ color:#ffd166; }
+  .btnRow{ display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:8px; }
+  .bigBtn{
+    pointer-events:auto; cursor:pointer; font-family:inherit; font-size:15px; font-weight:700; letter-spacing:1px;
+    padding:11px 26px; border-radius:11px; color:#08111f; border:none;
+    background:linear-gradient(180deg,#9fe4ff,#4ea8ff); box-shadow:0 6px 18px rgba(78,168,255,.35);
+    transition:transform .09s, filter .15s;
+  }
+  .bigBtn:hover{ filter:brightness(1.08); }
+  .bigBtn:active{ transform:scale(.97); }
+  .bigBtn.ghost{
+    background:rgba(24,30,54,.9); color:#cfe0ff; border:1px solid var(--line);
+    box-shadow:none; font-size:14px; padding:10px 20px;
+  }
+  .goldLineBig{ text-align:center; font-size:15px; font-weight:800; color:var(--gold); margin:6px 0 10px; }
+
+  /* 技能卡 */
+  .cards{ display:flex; gap:12px; justify-content:center; flex-wrap:wrap; }
+  .card{
+    cursor:pointer; width:210px; padding:14px 12px; border-radius:14px; text-align:center;
+    background:linear-gradient(180deg,rgba(38,46,84,.95),rgba(20,24,44,.95));
+    border:1px solid var(--line); box-shadow:0 8px 22px rgba(0,0,0,.45);
+    transition:transform .12s, border-color .12s, box-shadow .12s;
+  }
+  .card:hover{ transform:translateY(-4px); border-color:#7fb6ff; box-shadow:0 14px 30px rgba(70,140,255,.3); }
+  .card .ico{ font-size:30px; line-height:1.2; color:#9fe4ff; }
+  .card .nm{ font-size:15px; font-weight:800; margin:5px 0 4px; color:#fff; }
+  .card .ds{ font-size:12px; color:#a9bbe0; line-height:1.6; min-height:38px; }
+  .card .ph{
+    display:inline-block; margin-top:8px; font-size:10px; padding:1px 8px; border-radius:9px;
+    color:#ffd166; border:1px solid rgba(255,209,102,.4); background:rgba(255,209,102,.08);
+  }
+  .card .lv{ font-size:11px; color:#7f92bb; }
+  .card .skTag{
+    display:inline-block; margin-top:6px; font-size:10px; padding:1px 7px; border-radius:9px;
+    color:#9fe4ff; border:1px solid rgba(120,190,255,.35); background:rgba(80,150,255,.10);
+  }
+  .card.skill{ background:linear-gradient(180deg,rgba(52,40,90,.95),rgba(24,20,48,.95)); border-color:rgba(180,140,255,.5); }
+  .card .tier{ font-size:11px; font-weight:800; letter-spacing:2px; }
+  /* 技能条（已学技能）+ 主动技能槽 */
+  #skillBar, #activeBar{ display:flex; flex-wrap:wrap; gap:4px; margin-top:5px; }
+  .acChip{
+    display:flex; align-items:center; gap:4px; font-size:10px; padding:2px 7px; border-radius:9px;
+    background:rgba(20,30,60,.9); border:1px solid rgba(120,190,255,.45); color:#dff1ff;
+  }
+  .acChip.off{ opacity:.4; }
+  .acChip b{ color:#ffd166; font-weight:800; }
+  .skChip{
+    display:flex; align-items:center; gap:3px; font-size:10px; padding:1px 6px; border-radius:9px;
+    background:rgba(40,30,70,.85); border:1px solid rgba(180,140,255,.4); color:#e6dcff;
+  }
+  .skChip b{ color:#ffd166; }
+  /* Hex 列表 */
+  .hexRow{ display:flex; gap:10px; align-items:flex-start; padding:9px 11px; border-radius:11px;
+    background:rgba(24,28,50,.75); border:1px solid rgba(120,150,255,.2); cursor:pointer; }
+  .hexRow:hover{ border-color:#7fb6ff; }
+  .hexRow.owned{ opacity:.45; cursor:default; }
+  .hexRow .hn{ font-size:13px; font-weight:700; color:#fff; }
+  .hexRow .hd{ font-size:11px; color:#9fb0d8; line-height:1.5; margin-top:2px; }
+
+  /* 商店 */
+  .shopList{ display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:10px; margin-top:10px; }
+  .shopRow{
+    display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px;
+    background:rgba(24,28,50,.75); border:1px solid rgba(120,150,255,.2);
+  }
+  .sInfo{ flex:1; min-width:0; }
+  .sName{ font-size:13.5px; font-weight:700; color:#fff; }
+  .sLv{ font-size:11px; color:#8fa2cc; font-weight:500; }
+  .sDesc{ font-size:11.5px; color:#9fb0d8; margin-top:2px; line-height:1.5; }
+  .sBuy{
+    cursor:pointer; font-family:inherit; flex:0 0 auto; min-width:78px; padding:7px 10px; border-radius:9px;
+    font-size:12px; font-weight:700; color:#08111f; border:none;
+    background:linear-gradient(180deg,#ffe08a,#ffb733);
+  }
+  .sBuy:disabled{ background:rgba(70,78,110,.6); color:#9aa6c6; cursor:not-allowed; }
+  .sBuy:active:not(:disabled){ transform:scale(.96); }
+  /* 小鱼干（趣味事件） */
+  .fishBox{
+    display:flex; align-items:center; gap:10px; margin-top:12px; padding:10px 12px; border-radius:12px;
+    background:linear-gradient(90deg,rgba(60,40,20,.75),rgba(30,26,44,.75));
+    border:1px dashed rgba(255,209,102,.45);
+  }
+  .fishInfo{ flex:1; min-width:0; }
+  .fireCtrl{ display:flex; gap:6px; }
+  .fireCtrl .sBuy{ min-width:44px; }
+  #fireBox.locked{ opacity:.55; filter:grayscale(.4); }
+  .statLine{ text-align:center; font-size:12px; color:#93a4cc; margin-top:12px; line-height:1.9; }
+  .statLine b{ color:#fff; }
+
+  /* 暂停：技能 / Hex 详情 */
+  .pauseGrid{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; }
+  @media (max-width:640px){ .pauseGrid{ grid-template-columns:1fr; } }
+  .pane{
+    background:rgba(18,22,42,.7); border:1px solid rgba(120,150,255,.22);
+    border-radius:12px; padding:10px 12px; max-height:42vh; overflow:auto;
+  }
+  .pTitle{ font-size:12px; font-weight:800; letter-spacing:1px; color:#9fe4ff; margin-bottom:7px; }
+  .pSk{ margin-bottom:9px; }
+  .pSkName{ font-size:13px; font-weight:700; color:#fff; }
+  .pSkDesc{ font-size:11px; color:#8fa2cc; margin:2px 0 3px; line-height:1.5; }
+  .pMod{ font-size:11.5px; color:#c9d8f5; line-height:1.65; padding-left:10px; position:relative; }
+  .pMod:before{ content:'▸'; position:absolute; left:0; color:#7fb6ff; }
+  .pMod b{ color:#ffd166; }
+  .pNone{ font-size:11.5px; color:#6f7f9f; }
+  .pHex{ font-size:11.5px; line-height:1.6; margin-bottom:6px; }
+  .pHex b{ font-weight:700; }
+  .pHex span{ color:#9fb0d8; }
+
+  /* 伤害统计 */
+  .dmgRow{ margin-bottom:7px; }
+  .dmgTop{ display:flex; justify-content:space-between; font-size:11.5px; color:#c9d8f5; margin-bottom:2px; }
+  .dmgTop b{ color:#fff; font-variant-numeric:tabular-nums; }
+  .dmgPct{ color:#7fb6ff; font-weight:600; }
+  .dmgBar{ height:6px; border-radius:3px; background:rgba(8,10,20,.8); overflow:hidden; }
+  .dmgBar > i{ display:block; height:100%; border-radius:3px;
+    background:linear-gradient(90deg,#4ea8ff,#9fe4ff,#ffd166); }
+  .dmgHead{ font-size:12px; color:#9fb0d8; margin-bottom:8px; text-align:center; }
+  .dmgHead b{ color:#fff; }
+  .dmgSub{ font-size:10.5px; color:#7f92bb; margin-top:2px; }
+  .dmgSub b{ color:#cfe0ff; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<!-- ============ 左上角：生命 / 经验 / 能量（主动技能） ============ -->
+<div class="hud" id="hudLeft">
+  <div class="hrow"><span class="tag">生命</span><div class="bar hp"><i id="hpFill"></i><b id="hpText">100 / 100</b></div></div>
+  <div class="hrow"><span class="tag">经验</span><div class="bar xp"><i id="xpFill"></i><b id="xpText">0 / 13</b></div></div>
+  <div class="hrow"><span class="tag">能量</span><div class="bar en"><i id="enFill"></i><b id="enText">50 / 150</b></div></div>
+  <div class="hrow skillRow">
+    <span class="tag">技能</span>
+    <div id="chargeBox"><i class="pip"></i><i class="pip"></i><i class="pip"></i></div>
+    <span id="skillHint">拔刀瞬闪 · 空格</span>
+  </div>
+  <div id="lvBadge">Lv.1</div>
+  <div id="skillBar"></div>
+  <div id="activeBar"></div>
+  <div class="buffRow" id="buffRow"></div>
+</div>
+
+<!-- ============ 手机端主动技能按钮 ============ -->
+<button id="btnFly" class="miniBtn"><span class="ico">🕊</span><b class="num">J</b></button>
+<button id="btnCoin" class="miniBtn"><span class="ico">🪙</span><b class="num">K</b></button>
+<button id="btnSkill"><span class="ico">⚡</span><b class="num">1</b></button>
+
+<!-- ============ 右上角：计时 + 小地图 ============ -->
+<div class="hud" id="hudRight">
+  <div id="timer">00:00</div>
+  <canvas id="mini" width="150" height="150"></canvas>
+  <div class="miniTip">◈ 范围内精英 / 掉落 / 道具</div>
+  <div id="goldLine">金币 0</div>
+  <div class="hudBtns">
+    <button id="btnSpeed" class="uiBtn small">2× 速度 (F)</button>
+    <button id="btnPause" class="uiBtn small">暂停 (P)</button>
+  </div>
+</div>
+
+<!-- 竖屏提示（只在竖屏 + 触屏时出现，不遮挡操作） -->
+<div id="rotateTip">📱 横屏游玩可获得更大画面</div>
+
+<!-- ============ Boss 血条 ============ -->
+<div class="hud" id="bossWrap">
+  <div id="bossName">血月之主</div>
+  <div class="bar boss"><i id="bossFill"></i></div>
+</div>
+
+<div id="toasts"></div>
+
+<!-- ============ 开始界面 ============ -->
+<div class="screen on" id="startScreen">
+  <div class="panel">
+    <div class="title">血 夜 幸 存 者</div>
+    <div class="sub">
+      无限地图 · 无尽怪物 · 20 分钟后血月降临<br>
+      电脑：<b>WASD / 方向键</b>移动，<b>空格</b>闪现 &nbsp;<b>J</b> 飞天姿态 &nbsp;<b>K</b> 金钱的力量<br>
+      手机：<b>触屏拖动</b>出现虚拟摇杆，右下角圆形按钮释放技能<br>
+      升级选技能（最多 5 个），击败精英掉落 <b>Hex Tech</b> 三选一<br>
+      <b>P / Esc</b> 暂停 &nbsp;|&nbsp; 靠近自动吸附经验球与金币
+    </div>
+    <div class="goldLineBig">永久金币：<span id="startGold">0</span></div>
+    <div class="btnRow">
+      <button class="bigBtn" id="btnStart">开始游戏</button>
+      <button class="bigBtn ghost" id="btnShopFromStart">局外升级</button>
+      <button class="bigBtn ghost" id="btnReset">重置存档</button>
+    </div>
+    <div class="statLine" id="startBest"></div>
+  </div>
+</div>
+
+<!-- ============ 升级选卡（占位符技能系统） ============ -->
+<div class="screen" id="levelScreen">
+  <div class="panel">
+    <div class="title" style="font-size:24px">升 级 ！</div>
+    <div class="sub">选择一项强化 · 最多同时学习 <b>5</b> 个技能，解锁技能后才能学习它的子词条<br>
+      <b>幸运</b>越高，越有几率触发 <b>4 选 1</b></div>
+    <div class="cards" id="cardBox"></div>
+    <div class="sub" style="margin-top:12px">也可以按 <b>1 / 2 / 3 / 4</b> 快速选择</div>
+  </div>
+</div>
+
+<!-- ============ Hex Tech 三选一 ============ -->
+<div class="screen" id="hexScreen">
+  <div class="panel">
+    <div class="title" id="hexTitle" style="font-size:24px">HEX TECH</div>
+    <div class="sub" id="hexSub">选择一项 Hex Tech 改造</div>
+    <div class="cards" id="hexBox"></div>
+  </div>
+</div>
+
+<!-- ============ 自选属性碎片 ============ -->
+<div class="screen" id="shardScreen">
+  <div class="panel">
+    <div class="title" id="shardTitle" style="font-size:24px">属性碎片</div>
+    <div class="sub" id="shardSub">选择一个属性碎片</div>
+    <div class="cards" id="shardBox"></div>
+  </div>
+</div>
+
+<!-- ============ 万里挑一：全 Hex 列表 ============ -->
+<div class="screen" id="hexAllScreen">
+  <div class="panel">
+    <div class="title" style="font-size:24px">万 里 挑 一</div>
+    <div class="sub">从所有 Hex Tech 中挑选一个</div>
+    <div class="shopList" id="hexAllList"></div>
+  </div>
+</div>
+
+<!-- ============ 暂停 ============ -->
+<div class="screen" id="pauseScreen">
+  <div class="panel">
+    <div class="title" style="font-size:24px">暂 停</div>
+    <div class="statLine" id="pauseStats"></div>
+    <div class="pauseGrid">
+      <div class="pane">
+        <div class="pTitle">已学技能与词条</div>
+        <div id="pauseSkills"></div>
+      </div>
+      <div class="pane">
+        <div class="pTitle">已获得 Hex Tech</div>
+        <div id="pauseHexes"></div>
+      </div>
+      <div class="pane" style="grid-column:1/-1">
+        <div class="pTitle">伤害统计</div>
+        <div id="pauseDmg"></div>
+      </div>
+    </div>
+    <div class="btnRow">
+      <button class="bigBtn" id="btnResume">继续</button>
+      <button class="bigBtn ghost" id="btnQuit">放弃本局</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 结算 ============ -->
+<div class="screen" id="overScreen">
+  <div class="panel">
+    <div class="title" id="overTitle">你 死 了</div>
+    <div class="statLine" id="overStats"></div>
+    <div class="pane" style="margin:10px auto 0; max-width:640px">
+      <div class="pTitle">伤害统计</div>
+      <div id="overDmg"></div>
+    </div>
+    <div class="btnRow">
+      <button class="bigBtn" id="btnAgain">再来一局</button>
+      <button class="bigBtn ghost" id="btnShopFromOver">局外升级</button>
+      <button class="bigBtn ghost" id="btnHome">返回主页</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 局外升级（占位符） ============ -->
+<div class="screen" id="shopScreen">
+  <div class="panel">
+    <div class="title" style="font-size:24px">局 外 升 级</div>
+    <div class="goldLineBig">永久金币：<span id="shopGold">0</span></div>
+    <div class="sub">用局内获得的金币永久提升属性 · 每条 5 级 · 数值见 META_UPGRADES 数据表</div>
+    <div class="shopList" id="shopList"></div>
+    <div class="fishBox">
+      <div class="fishInfo">
+        <div class="sName">🐟 购买小鱼干 <span class="sLv" id="fishCount">已购买 0 条</span></div>
+        <div class="sDesc">花费 100 金币给猫猫购买小鱼干，虽然没实际效果，但是喵喵之神会祝你好运。</div>
+      </div>
+      <div class="fireCtrl">
+        <button class="sBuy" id="btnFish">买 1 条 · 100 金币</button>
+        <button class="sBuy" id="btnFish10">买 10 条 · 1000 金币</button>
+      </div>
+    </div>
+    <div class="fishBox" id="fireBox">
+      <div class="fishInfo">
+        <div class="sName">🔥 添火 <span class="sLv" id="fireLv">初始诅咒 0</span></div>
+        <div class="sDesc" id="fireDesc">通关一次后解锁。可自选每局开局携带的诅咒层数（每点诅咒：经验/金币掉落 +10%，怪物血量/数量/攻击 +5%）。</div>
+      </div>
+      <div class="fireCtrl">
+        <button class="sBuy" id="btnFireMinus">−</button>
+        <button class="sBuy" id="btnFirePlus">＋</button>
+      </div>
+    </div>
+    <div class="btnRow"><button class="bigBtn" id="btnShopBack">返回</button></div>
+  </div>
+</div>
+
+<script>
+(function () {
+'use strict';
+
+/* ==========================================================================
+   1. 基础工具
+   ========================================================================== */
+const TAU = Math.PI * 2;
+const rand = (a, b) => a + Math.random() * (b - a);
+const randInt = (a, b) => Math.floor(a + Math.random() * (b - a + 1));
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const $ = (s) => document.querySelector(s);
+
+function hash2(x, y) {
+  let h = (x | 0) * 374761393 + (y | 0) * 668265263;
+  h = (h ^ (h >> 13)) * 1274126177;
+  h ^= h >> 16;
+  return (h >>> 0) / 4294967296;
+}
+function fmtTime(s) {
+  s = Math.max(0, Math.floor(s));
+  const m = Math.floor(s / 60);
+  return String(m).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+
+/* ==========================================================================
+   2. 全局配置（数值可整体替换为策划表）
+   ========================================================================== */
+const SPEED_PER_POINT = 42;      // 移速 1 点 = 42 px/s
+const BASE_MOVE = 6;             // 主角初始移速（6 点 = 252 px/s，已 +20%）
+const BASE_SPEED = BASE_MOVE * SPEED_PER_POINT;
+// 怪物速度使用【独立参照系】，这样调整主角移速不会连带改变怪物手感
+const ENEMY_REF_SPEED = 210;     // 怪物参照速度 = 主角原始基准（5 × 42）
+const ENEMY_SPEED_RATE = 0.7 * 0.95; // 怪物移速 = 参照速度 × 70% 后再降 5% ≈ 139.7 px/s
+const MAX_ENEMIES = 500;         // 怪物数量累计 +103%，上限同步放宽
+const MAX_PARTICLES = 1400;
+const XP_DROP_MUL = 1.25;        // 每个怪物经验掉落 +25%
+const SPAWN_MUL = 1.20 * 1.30 * 1.30;  // 刷怪数量 +20% → +30% → 再 +30% = ×2.028
+// 敌人总生命倍率：历次需求累计为 ×2.8125，实测会导致同屏撞上限（清怪跟不上），回调至 ×1.15
+const ENEMY_HP_MUL = 1.15 * 1.3 * 3.0 * 0.5 * 0.95;   // 普通小怪（再 -5%）
+const ELITE_HP_MUL = 6.0 * 2.0 * 0.65 * 0.9;   // 精英（再 -10%）
+const BOSS_HP_MUL = 6.0 * 1.5 * 0.8 * 0.9;     // Boss（再 -10%）
+const ENEMY_BULLET_SPEED_MUL = 0.9;  // 远程子弹射速 -10%
+const SHOT_LIFE_MUL = 3;         // 突击步枪 / 干冰弹 子弹存在时间 ×3
+const DRONE_BASE_SIZE = 1.30;    // 无人机基础大小 +30%
+const DRONE_BASE_SPIN = 1.30;    // 无人机基础旋转速度 +30%
+
+const ELITE_INTERVAL = 180;      // 每 3 分钟一个精英
+const BOSS_TIME = 20 * 60;       // 第 20 分钟清屏并生成 Boss
+const MINI_RANGE = 1700;         // 小地图显示半径
+
+// 升级经验公式 —— 每级需求较原曲线下降 50%，再下降 10%（合计 ×0.45）
+function xpNeeded(level) {
+  return Math.max(1, Math.round((6 + 6 * level + 0.7 * level * level) * 0.5 * 0.9));
+}
+/* 怪物成长曲线：基础 G(m) = m*0.5 + m^1.8*0.05
+   · 普通怪 生命/攻击成长 +50%
+   · 精英/Boss 生命/攻击成长 +100%
+   攻击成长斜率刻意比生命平坦（并有上限），否则后期会被一击秒杀 */
+const ENEMY_ATK_GROWTH = 0.10;   // 攻击成长斜率（可调）
+const ENEMY_ATK_CAP_N = 2.5;     // 普通怪攻击成长上限（约 11 分钟后触顶）
+const ENEMY_ATK_CAP_B = 3.0;     // 精英/Boss 攻击成长上限（避免后期被一击秒杀）
+function grow(t) {
+  const m = t / 60;
+  return m * 0.5 + Math.pow(m, 1.8) * 0.05;
+}
+function hpScale(t) { return 1 + grow(t) * 1.5; }                                  // 普通怪生命
+function atkScale(t) { return Math.min(ENEMY_ATK_CAP_N, 1 + grow(t) * 1.5 * ENEMY_ATK_GROWTH); }
+function bigHpScale(t) { return 1 + grow(t) * 2.0; }                               // 精英/Boss 生命
+function bigAtkScale(t) { return Math.min(ENEMY_ATK_CAP_B, 1 + grow(t) * 2.0 * ENEMY_ATK_GROWTH); }
+
+/* ---- 主角主动技能：拔刀瞬闪（左上角技能条） ---- */
+const ACTIVE = {
+  name: '拔刀瞬闪',
+  cost: 50,              // 每次消耗 50 能量
+  maxEnergy: 150,        // 150 = 可充能 3 次
+  startEnergy: 50,       // 开局自带 1 次
+  damageMul: 5,          // 伤害 = 5 × 等级 × 攻击力
+  invuln: 2,             // 释放后无敌 2 秒
+  screenRatio: 0.55,     // 闪现距离 ≈ 大半个屏幕
+  radius: 58,            // 路径伤害判定半宽
+  slow: 0.45,            // 路径上的敌人减速 45%（时长受「负面效果」加成）
+  slowTime: 2,
+  vuln: 0.25,            // 路径上的敌人「易伤」+25% 受到伤害
+  vulnTime: 3
+};
+
+/* ---- 负面状态系统 ----
+   时长统一受「负面效果」加成；精英/Boss 有 90% 时长抗性（靠堆「负面效果」克服） */
+/* ===== 燃烧系数（要调数值改这里） =====
+   BURN_BODY_PCT：「热能焚身」的燃烧每秒额外造成 目标当前生命值 × 该系数 的伤害
+   BURN_TIME    ：单次施加燃烧的基础持续秒数 */
+const BURN_BODY_PCT = 0.07;   // 热能焚身：7% 当前生命值 / 秒
+const BURN_TIME = 11;          // 燃烧持续 11 秒
+
+const DEBUFF_RESIST = { elite: 0.9, boss: 0.9 };   // 精英/Boss 90% 异常状态抗性
+// 击退抗性：精英 90%、Boss 100%（叠加在普通怪之上）
+const KNOCK_RESIST = { elite: 0.9, boss: 1.00 };
+function debuffTime(e, base) {
+  const r = e.boss ? DEBUFF_RESIST.boss : e.elite ? DEBUFF_RESIST.elite : 0;
+  return base * (1 + P.debuff) * (1 - r);
+}
+// 减速：降低移动速度，并让远程怪无法开火
+function applySlow(e, mul, base) {
+  const t = debuffTime(e, base);
+  if (t <= 0) return;
+  if (t > (e.slowT || 0)) e.slowT = t;
+  e.slowMul = Math.max(e.slowMul || 0, mul);
+}
+// 易伤：受到的伤害提高
+function applyVuln(e, mul, base) {
+  const t = debuffTime(e, base);
+  if (t <= 0) return;
+  if (t > (e.vulnT || 0)) e.vulnT = t;
+  e.vulnMul = Math.max(e.vulnMul || 0, mul);
+}
+const charges = () => Math.floor(P.energy / ACTIVE.cost);
+
+/* ---- 普通敌人类型：几何图形（数值已按 主角 100 生命 / 20 攻击 重新配平） ---- */
+const TYPES = {
+  grunt:   { key:'grunt',   name:'游魂', shape:'tri',     r:15, hp:16, dmg:6,  sf:1.0, color:'#ff5d6c', xp:2, gold:0.14, w:1.00 },
+  runner:  { key:'runner',  name:'疾影', shape:'diamond', r:13, hp:12, dmg:5,  sf:1.0, color:'#ffa63d', xp:2, gold:0.12, w:0.85, from:60 },
+  tank:    { key:'tank',    name:'石甲', shape:'square',  r:22, hp:52, dmg:11, sf:0.7, color:'#9d7bff', xp:5, gold:0.26, w:0.55, from:150 },
+  spitter: { key:'spitter', name:'吐刺', shape:'penta',   r:16, hp:26, dmg:6,  sf:1.0, color:'#4be1a0', xp:4, gold:0.20, w:0.55, from:240, ranged:true, bdmg:8 }
+};
+
+/* ==========================================================================
+   2.1 技能系统
+   --------------------------------------------------------------------------
+   · 每个技能有独立的技能急速(skill.haste)，与总技能急速【加算】后生效
+     冷却缩减 = (总急速 + 独立急速) / (100 + 总急速 + 独立急速)
+   · 词条(mods) 全部加算，除标注"最终乘算"的以外
+   · 只有先解锁技能，才能学习它的子词条；最多同时学习 5 个技能
+   ========================================================================== */
+const MAX_SKILLS = 5;
+// 闪击射线 / 离子斩的固定发射间隔（不吃技能急速，见 updateRay）
+const SUBRAY_INTERVAL = 0.25;
+const ION_INTERVAL = 0.075;
+const SKILL_DEFS = {
+  rifle: {
+    id:'rifle', name:'突击步枪', ico:'🔫', color:'#ffd166', base:true, w:0,
+    cd:0.85, mul:1.5, targets:1, pierce:0,
+    desc:'初始技能：锁定一个敌人发射子弹造成伤害'
+  },
+  lightning: {
+    id:'lightning', name:'威能闪电', ico:'⚡', color:'#9be7ff', w:50,
+    cd:6, mul:4.5, targets:2, pierce:0,
+    desc:'每 6 秒降下闪电锁定随机 2 个敌人打击造成伤害'
+  },
+  ray: {
+    id:'ray', name:'高能射线', ico:'🔷', color:'#8fd3ff', w:50,
+    cd:4.5, mul:3.0, targets:1, pierce:Infinity,
+    desc:'每 4.5 秒锁定一个敌人发射极快速淡蓝色贯穿射线，对一条直线上的敌人造成瞬间伤害'
+  },
+  drone: {
+    id:'drone', name:'切割无人机', ico:'🌀', color:'#c8d2ff', w:50,
+    cd:0, mul:1.5, targets:0, pierce:Infinity,
+    desc:'召唤环绕主角旋转的无人机，对触碰到的敌人每 0.1 秒造成伤害'
+  },
+  dryice: {
+    id:'dryice', name:'干冰弹', ico:'❄', color:'#bff0ff', w:50,
+    cd:3, mul:1.5, targets:1, pierce:6,
+    desc:'每 3 秒发射一枚能贯穿 6 个敌人的干冰弹，对路径上所有敌人造成伤害'
+  },
+  thermo: {
+    id:'thermo', name:'温压弹', ico:'🔥', color:'#ffb347', w:50,
+    cd:3, mul:6.0, targets:1, pierce:0,
+    desc:'每 3 秒发射一枚温压弹，命中的首个敌人受到伤害'
+  },
+  frostarmor: {
+    id:'frostarmor', name:'霜铸甲胄', ico:'🛡', color:'#a9e6ff', w:50,
+    cd:25, mul:0, targets:0, pierce:0,
+    desc:'每 25 秒生成 1 层保护罩，受到攻击时破碎，可抵挡 0.5 秒内受到的所有伤害'
+  }
+};
+const SKILL_ORDER = ['rifle', 'lightning', 'ray', 'drone', 'dryice', 'thermo', 'frostarmor'];
+
+/* ---- 词条表：w=权重, max=上限, req=[词条,数量], reqSkill=需先解锁的技能 ---- */
+const MASTERIES = [
+  /* ---------- 1. 突击步枪 ---------- */
+  { sk:'rifle', id:'r_volley', name:'子弹连发', desc:'攻击时额外发射一波子弹', w:30, max:3, apply:st=>{ st.volley += 1; } },
+  { sk:'rifle', id:'r_salvo',  name:'子弹齐射', desc:'攻击时额外瞄准一个目标发射子弹', w:30, max:3, apply:st=>{ st.targets += 1; } },
+  { sk:'rifle', id:'r_dmg',    name:'子弹增幅', desc:'子弹伤害倍率 +60%', w:60, max:5, apply:st=>{ st.dmgAdd += 0.6; } },
+  { sk:'rifle', id:'r_pierce', name:'子弹穿透', desc:'子弹可以穿透攻击，穿透数量 +1', w:60, max:5, apply:st=>{ st.pierce += 1; } },
+  { sk:'rifle', id:'r_split',  name:'子弹分裂', desc:'子弹首次命中敌人时分裂出 2 个次级子弹，继承 50% 总伤害和全额特殊效果', w:60, max:1, req:[['r_dmg',1]], apply:st=>{ st.split = 2; st.splitKeep = 0.5; } },
+  { sk:'rifle', id:'r_split4', name:'子弹四分裂', desc:'子弹首次命中敌人时分裂出 4 个次级子弹，继承 75% 总伤害和全额特殊效果（替代子弹分裂）', w:100, max:1, req:[['r_split',1]], apply:st=>{ st.split = 4; st.splitKeep = 0.75; } },
+  { sk:'rifle', id:'r_haste',  name:'快速射速', desc:'突击步枪技能急速 +10', w:60, max:5, apply:st=>{ st.haste += 10; } },
+  { sk:'rifle', id:'r_elem',   name:'元素子弹', desc:'子弹发射时有 20% 概率被替换为冰/火/电/能量子弹（各自独立判定，一颗子弹只有一种属性）。冰：冻结 0.3 秒；火：灼烧 3 秒，每秒 1 倍攻击力；电：感电 3 秒，被感电目标互相分享 5% 受到的伤害；能量：易伤 3 秒，受到伤害 +15%',
+    w:30, max:1, req:[['r_volley',1],['r_salvo',1],['r_pierce',1],['r_haste',1]], apply:st=>{ st.flags.elem = 1; } },
+  { sk:'rifle', id:'r_bounce', name:'子弹弹射', desc:'子弹命中屏幕边缘会反射，反射次数 +1', w:60, max:2, reqSkill:'drone', apply:st=>{ st.bounce += 1; } },
+
+  /* ---------- 2. 威能闪电 ---------- */
+  { sk:'lightning', id:'l_split', name:'电磁分流', desc:'额外锁定 1 个敌人打击', w:60, max:5, apply:st=>{ st.targets += 1; } },
+  { sk:'lightning', id:'l_haste', name:'电磁增效', desc:'威能闪电技能急速 +10', w:60, max:5, apply:st=>{ st.haste += 10; } },
+  { sk:'lightning', id:'l_aoe',   name:'电磁爆炸', desc:'威能闪电对锁定敌人周围也会造成 50% 的伤害', w:60, max:1, apply:st=>{ st.flags.aoe = 1; } },
+  { sk:'lightning', id:'l_dmg',   name:'电磁增伤', desc:'威能闪电倍率 +60%', w:60, max:5, apply:st=>{ st.dmgAdd += 0.6; } },
+  { sk:'lightning', id:'l_chase', name:'电磁追捕', desc:'威能闪电和次级闪电击杀敌人时额外释放 25% 总伤害的次级闪电', w:30, max:1, req:[['l_split',1],['l_haste',1]], apply:st=>{ st.flags.chase = 1; } },
+  { sk:'lightning', id:'l_particle', name:'电磁粒子', desc:'威能闪电命中敌人时以目标为中心朝 8 个固定方向发射无限穿透电磁粒子，造成 50% 的伤害（最多 1 次）', w:60, max:1, req:[['l_chase',1]], apply:st=>{ st.flags.particle = 1; } },
+  { sk:'lightning', id:'l_nuclear', name:'核能电磁', desc:'威能闪电及其衍生技能伤害 +50%（最终乘算）', w:30, max:1, req:[['l_dmg',1],['l_aoe',1]], apply:st=>{ st.finalMul *= 1.5; } },
+  { sk:'lightning', id:'l_para', name:'磁化', desc:'威能闪电及其衍生技能会麻痹目标 0.2 秒', w:30, max:1, req:[['l_chase',1]], apply:st=>{ st.flags.para = 1; } },
+
+  /* ---------- 3. 高能射线 ---------- */
+  { sk:'ray', id:'y_charge', name:'充能', desc:'高能射线伤害倍率 +60%', w:60, max:5, apply:st=>{ st.dmgAdd += 0.6; } },
+  { sk:'ray', id:'y_power',  name:'功率增幅', desc:'高能射线技能急速 +10', w:60, max:5, apply:st=>{ st.haste += 10; } },
+  { sk:'ray', id:'y_store',  name:'蓄能', desc:'高能射线额外锁定 1 个敌人发射', w:60, max:2, apply:st=>{ st.targets += 1; } },
+  { sk:'ray', id:'y_mirror', name:'镜面反射', desc:'高能射线在命中屏幕边缘会反射 1 次，反射次数 +1', w:30, max:3, req:[['y_charge',1],['y_power',1],['y_store',1]], apply:st=>{ st.bounce += 1; } },
+  { sk:'ray', id:'y_particle', name:'粒子冲击', desc:'高能射线及其衍生技能在杀死敌人时会在敌人处产生次级射线瞄准另一个敌人，造成高能射线 50% 总伤害', w:60, max:1, req:[['y_mirror',1]], apply:st=>{ st.flags.onkill = 1; } },
+  { sk:'ray', id:'y_flash', name:'闪击射线', desc:'每 0.25 秒额外发射一道淡紫色次级射线瞄准敌人，造成高能射线 50% 的总伤害', w:60, max:1, req:[['y_particle',1]], apply:st=>{ st.flags.subRay = 1; } },
+  { sk:'ray', id:'y_ion', name:'离子斩', desc:'每 0.075 秒场上会生成 1 道离子光束（屏幕内随机敌人、随机角度），伤害与宽度继承射线，并可继承威能闪电的控制效果', w:100, max:1, req:[['l_chase',1],['y_flash',1]], apply:st=>{ st.flags.ion = 1; } },
+  { sk:'ray', id:'y_pol', name:'极化', desc:'高能射线 / 闪击射线 / 次级射线 / 离子斩的宽度 +50%', w:30, max:2, apply:st=>{ st.widthMul += 0.50; } },
+  { sk:'ray', id:'y_flame', name:'爆燃吹息', desc:'高能射线进化为火焰射线，命中敌人时附加温压弹的燃烧效果，并发射一枚继承所有强化效果的温压弹', w:60, max:1, req:[['y_particle',1],['t_burnbody',1]], apply:st=>{ st.flags.flame = 1; } },
+
+  /* ---------- 4. 切割无人机 ---------- */
+  { sk:'drone', id:'d_dmg',  name:'利刃冲击', desc:'切割无人机伤害倍率 +60%', w:60, max:5, apply:st=>{ st.dmgAdd += 0.6; } },
+  { sk:'drone', id:'d_size', name:'重型机组', desc:'切割无人机大小 +25%', w:60, max:3, apply:st=>{ st.sizeMul += 0.25; } },
+  { sk:'drone', id:'d_spin', name:'高速飞行', desc:'切割无人机旋转速度 +30%', w:60, max:3, apply:st=>{ st.rotMul += 0.30; } },
+  { sk:'drone', id:'d_count', name:'无人机集群', desc:'切割无人机数量 +1', w:60, max:5, apply:st=>{ st.count += 1; } },
+  { sk:'drone', id:'d_knock', name:'震荡猛击', desc:'切割无人机在造成伤害时有 5% 概率击退敌人一段距离', w:30, max:1, req:[['d_dmg',1],['d_spin',1],['d_size',1]], apply:st=>{ st.flags.knock = 1; } },
+  { sk:'drone', id:'d_bee', name:'工蜂追击', desc:'切割无人机外圈添加一圈反方向的淡黄色工蜂无人机，数量/角速度/伤害与切割无人机一致。工蜂命中敌人时有 20% 概率沿当前方向发射一架持续 5 秒、线速度相同的切割无人机', w:100, max:1, req:[['d_count',3]], apply:st=>{ st.flags.bees = 1; } },
+
+  /* ---------- 5. 干冰弹 ---------- */
+  { sk:'dryice', id:'i_dmg', name:'冰霜增幅', desc:'干冰弹伤害倍率 +60%', w:60, max:5, apply:st=>{ st.dmgAdd += 0.6; } },
+  { sk:'dryice', id:'i_pierce', name:'低温贯穿', desc:'干冰弹贯穿数量 +2', w:60, max:3, apply:st=>{ st.pierce += 2; } },
+  { sk:'dryice', id:'i_freeze', name:'急冻寒冰', desc:'干冰弹命中敌人时有 15% 概率冻结目标 0.5 秒', w:30, max:1, apply:st=>{ st.flags.freeze = 1; } },
+  { sk:'dryice', id:'i_trail', name:'冰之痕', desc:'干冰弹飞行时留下浅色冰痕路径，路径上所有敌人每 0.1 秒叠加 1 层持续 3 秒的冻伤（独立计算，上限 99 层）。每层冻伤基础伤害 0.005 倍攻击力，每次造成冻伤都会刷新持续时间并结算当前层数的冻伤总伤害', w:30, max:1, req:[['i_dmg',1],['i_pierce',1],['i_freeze',1]], apply:st=>{ st.flags.trail = 1; } },
+
+  { sk:'dryice', id:'i_salvo', name:'干冰弹齐射', desc:'攻击时额外瞄准一个目标发射干冰弹', w:30, max:3, apply:st=>{ st.targets += 1; } },
+  { sk:'dryice', id:'i_volley', name:'干冰弹连发', desc:'攻击时额外发射一波干冰弹', w:30, max:3, apply:st=>{ st.volley += 1; } },
+  { sk:'dryice', id:'i_bigice', name:'极寒大冰弹', desc:'干冰弹在每次命中敌人时分裂出 2 个次级干冰弹，继承 50% 总伤害并可贯穿 6 个单位（不继承特殊效果）', w:60, max:1, req:[['i_trail',1]], apply:st=>{ st.flags.splitIce = 1; } },
+  { sk:'dryice', id:'i_shrapnel', name:'冰流霰弹', desc:'极寒大冰弹分裂出的次级干冰弹现在能够继承干冰弹和温压弹的所有效果', w:100, max:1, req:[['i_bigice',1],['t_burnbody',1]], apply:st=>{ st.flags.iceInherit = 1; } },
+  { sk:'dryice', id:'i_storm', name:'风暴潮', desc:'威能闪电及其衍生技能命中被冻结的敌人时，会在目标位置发射一根自动索敌的干冰弹，该干冰弹继承干冰弹与威能闪电的全部效果', w:100, max:1, req:[['i_bigice',1],['l_particle',1]], apply:st=>{ st.flags.storm = 1; } },
+
+  /* ---------- 6. 温压弹 ---------- */
+  { sk:'thermo', id:'t_volley', name:'温压弹连发', desc:'攻击时额外发射一个温压弹', w:30, max:4, apply:st=>{ st.volley += 1; } },
+  { sk:'thermo', id:'t_salvo', name:'温压弹齐射', desc:'攻击时额外瞄准一个目标发射温压弹', w:30, max:3, apply:st=>{ st.targets += 1; } },
+  { sk:'thermo', id:'t_boom', name:'热能爆炸', desc:'温压弹在命中时会爆炸，对周围敌人造成 50% 温压弹总伤害并附加温压弹全部特殊效果', w:60, max:1, apply:st=>{ st.flags.boom = 1; } },
+  { sk:'thermo', id:'t_burn', name:'热能燃烧', desc:'温压弹会点燃目标 11 秒，每秒造成 +6.0 倍攻击力的灼伤伤害', w:60, max:3, req:[['t_boom',1]], apply:st=>{ st.burnDps += 6.0; } },
+  { sk:'thermo', id:'t_radius', name:'热能扩散', desc:'温压弹爆炸范围增加 40%', w:30, max:3, apply:st=>{ st.radiusMul += 0.40; } },
+  { sk:'thermo', id:'t_super', name:'超爆弹', desc:'温压弹进化为超爆弹，现在可以无限贯穿', w:60, max:1, req:[['t_boom',1],['t_radius',1]], apply:st=>{ st.pierce = Infinity; } },
+  { sk:'thermo', id:'t_burnbody', name:'热能焚身', desc:'温压弹的燃烧额外附加目标 ' + (Math.round(BURN_BODY_PCT * 1000) / 10) + '% 当前生命值的伤害', w:60, max:1, req:[['t_burn',1]], apply:st=>{ st.flags.burnHp = 1; } },
+  { sk:'thermo', id:'t_haste', name:'富燃料填充', desc:'温压弹技能急速 +10', w:30, max:3, apply:st=>{ st.haste += 10; } },
+
+  /* ---------- 7. 霜铸甲胄 ---------- */
+  { sk:'frostarmor', id:'f_boom', name:'冰霜爆裂', desc:'护盾消失时对周围所有敌人造成一次爆炸伤害（基础倍率 8.0），爆炸伤害 +60%', w:30, max:5, apply:st=>{ st.boomAdd += 0.6; } },
+  { sk:'frostarmor', id:'f_layer', name:'凝霜甲胄', desc:'护盾的上限层数 +1', w:30, max:2, apply:st=>{ st.maxLayers += 1; } },
+  { sk:'frostarmor', id:'f_extend', name:'冰霜延续', desc:'护盾消失时，无敌时间 +0.15 秒', w:30, max:3, apply:st=>{ st.invAdd += 0.15; } },
+  { sk:'frostarmor', id:'f_haste', name:'极寒', desc:'霜铸甲胄技能急速 +10', w:30, max:5, apply:st=>{ st.haste += 10; } },
+  { sk:'frostarmor', id:'f_reduce', name:'冰系缩减', desc:'霜铸甲胄和干冰弹的技能急速 +20', w:60, max:1, req:[['f_haste',1]], reqSkill:'dryice', apply:st=>{ st.haste += 20; if (P.skills.dryice) P.skills.dryice.haste += 20; } },
+  { sk:'frostarmor', id:'f_zero', name:'绝对零度', desc:'护盾消失的无敌时间结束后，会冻结屏幕内所有敌人 1 秒', w:60, max:1, req:[['f_extend',3]], apply:st=>{ st.flags.zero = 1; } }
+];
+const MASTERY_BY_ID = {};
+for (const m of MASTERIES) MASTERY_BY_ID[m.id] = m;
+
+/* ---- 属性碎片：银 / 金 / 棱彩 三阶，获得时同阶三选一 ---- */
+const SHARD_TIERS = [
+  { key:'silver', name:'银色碎片', color:'#c9d4e8', base:60,
+    opts:[
+      { n:'攻击 +5%',     f:()=>{ P.atkPct += 0.05; } },
+      { n:'防御 +2%',     f:()=>{ P.defList.push(0.02); } },
+      { n:'移速 +2%',     f:()=>{ P.spdPct += 0.02; } },
+      { n:'技能急速 +5',  f:()=>{ P.haste += 5; } },
+      { n:'生命 +15',     f:()=>{ P.hpFlat += 15; P.hp += 15; } },
+      { n:'幸运 +1',      f:()=>{ P.luck += 1; } },
+      { n:'诅咒 +1',      f:()=>{ P.curse += 1; } }
+    ] },
+  { key:'gold', name:'黄金碎片', color:'#ffd166', base:30,
+    opts:[
+      { n:'攻击 +8%',     f:()=>{ P.atkPct += 0.08; } },
+      { n:'防御 +3%',     f:()=>{ P.defList.push(0.03); } },
+      { n:'移速 +4%',     f:()=>{ P.spdPct += 0.04; } },
+      { n:'技能急速 +8',  f:()=>{ P.haste += 8; } },
+      { n:'生命 +25',     f:()=>{ P.hpFlat += 25; P.hp += 25; } },
+      { n:'格挡值 +1',    f:()=>{ P.block += 1; } },
+      { n:'幸运 +2',      f:()=>{ P.luck += 2; } },
+      { n:'诅咒 +2',      f:()=>{ P.curse += 2; } },
+      { n:'负面效果 +5%', f:()=>{ P.debuff += 0.05; } },
+      { n:'生命恢复 +0.2', f:()=>{ P.regen += 0.2; } },
+      { n:'能量恢复 +0.1', f:()=>{ P.energyRegen += 0.1; } }
+    ] },
+  { key:'prism', name:'棱彩碎片', color:'#c08bff', base:10,
+    opts:[
+      { n:'攻击 +12%',    f:()=>{ P.atkPct += 0.12; } },
+      { n:'防御 +4%',     f:()=>{ P.defList.push(0.04); } },
+      { n:'移速 +5%',     f:()=>{ P.spdPct += 0.05; } },
+      { n:'技能急速 +12', f:()=>{ P.haste += 12; } },
+      { n:'生命值 +35',   f:()=>{ P.hpFlat += 35; P.hp += 35; } },
+      { n:'格挡值 +2',    f:()=>{ P.block += 2; } },
+      { n:'幸运 +3',      f:()=>{ P.luck += 3; } },
+      { n:'诅咒 +3',      f:()=>{ P.curse += 3; } },
+      { n:'负面效果 +10%', f:()=>{ P.debuff += 0.10; } },
+      { n:'生命恢复 +0.3', f:()=>{ P.regen += 0.3; } },
+      { n:'能量恢复 +0.15', f:()=>{ P.energyRegen += 0.15; } },
+      { n:'嗜血 +0.01%',  f:()=>{ P.lifesteal += 0.0001; } }
+    ] }
+];
+const SHARD_BY_KEY = {};
+for (const t of SHARD_TIERS) SHARD_BY_KEY[t.key] = t;
+// 掷骰：先定品阶（60/30/10，受碎片幸运影响），再同阶三选一
+function rollShardTier() {
+  const boost = 1 + (P.hx.shardTierLuck || 0);
+  const w = {
+    silver: SHARD_BY_KEY.silver.base,
+    gold: SHARD_BY_KEY.gold.base * boost,
+    prism: SHARD_BY_KEY.prism.base * boost
+  };
+  const total = w.silver + w.gold + w.prism;
+  let r = Math.random() * total;
+  if ((r -= w.silver) < 0) return 'silver';
+  if ((r -= w.gold) < 0) return 'gold';
+  return 'prism';
+}
+// n 个「自选属性碎片」入队，逐个弹出三选一
+function grantShards(n) {
+  if (!n) return;
+  for (let i = 0; i < n; i++) G.shardQueue.push(rollShardTier());
+  if (!G.shardPick && !G.paused) openShardPick();
+}
+/* 统一弹窗调度：升级选卡 / 属性碎片 / Hex 三类互不阻塞 */
+function drainModals() {
+  if (G.shardPick) return;
+  if (G.shardQueue.length) { openShardPick(); return; }
+  if (G.hexPick) return;
+  if (G.hexQueue.length) { openHexPick(G.hexQueue.shift()); return; }
+  if (G.pendingLevels > 0 && !G.levelUpOpen) { openLevelUp(); return; }
+  G.paused = false;
+}
+function openShardPick() {
+  if (G.shardPick || !G.shardQueue.length) return;
+  const key = G.shardQueue.shift();
+  G.shardPick = key;
+  const t = SHARD_BY_KEY[key];
+  $('#shardTitle').textContent = t.name;
+  $('#shardTitle').style.color = t.color;
+  $('#shardSub').textContent = '选择 1 个属性（剩余待选 ' + G.shardQueue.length + ' 个碎片）';
+  const box = $('#shardBox');
+  box.innerHTML = '';
+  const pool = t.opts.slice();
+  const opts = [];
+  for (let i = 0; i < 3 && pool.length; i++) opts.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  for (const s of opts) {
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.innerHTML = '<div class="tier" style="color:' + t.color + '">' + t.name + '</div>' +
+      '<div class="nm">' + s.n + '</div>';
+    el.addEventListener('click', () => pickShard(s));
+    box.appendChild(el);
+  }
+  G.paused = true;
+  $('#shardScreen').classList.add('on');
+}
+function pickShard(s) {
+  s.f();
+  recalc();
+  $('#shardScreen').classList.remove('on');
+  G.shardPick = null;
+  drainModals();
+}
+
+/* ==========================================================================
+   2.2 Hex Tech：银 / 金 / 棱彩 三阶，击败精英掉落，三选一
+   ========================================================================== */
+const HEX_TIERS = {
+  silver: { key:'silver', name:'银色', color:'#c9d4e8', base:30 },
+  gold:   { key:'gold',   name:'黄金', color:'#ffd166', base:40 },
+  prism:  { key:'prism',  name:'棱彩', color:'#c08bff', base:30 }
+};
+// 额外主动技能（Hex 提供），最多 2 个，按键 E / R
+const FLY_TIME = 4;              // 飞天姿态持续 4 秒
+const ACTIVES = {
+  blink:   { id:'blink',  name:'拔刀瞬闪', ico:'⚡', cost:50, key:'空格' },
+  fly:     { id:'fly',    name:'飞天姿态', ico:'🕊', cost:50, key:'J' },
+  coin:    { id:'coin',   name:'金钱的力量', ico:'🪙', cost:0,  key:'K', continuous:true }
+};
+
+const HEXES = [
+  /* ---------------- 银色 ---------------- */
+  /* 说明：所有持续生效的改动都通过 hxAdd / hxMul / hxFlag 记账，
+     以便「质变：潘多拉」等效果可以真正撤销已获得的 Hex。 */
+  { id:'s_upgold', tier:'silver', name:'质变：黄金阶', desc:'获得一个随机的黄金 Hex Tech', f:()=>{
+      const h = grantRandomHex('gold'); if (h) hxDo(() => revertHex(h.id));
+    } },
+  { id:'s_speed',  tier:'silver', name:'唯快不破', desc:'移动速度越快，造成伤害越高，上限 +15%（独立乘区）', f:()=>{ hxFlag('spdDmg'); } },
+  { id:'s_haste',  tier:'silver', name:'火力加强', desc:'技能急速 +25', f:()=>{ hxAdd('haste', 25); } },
+  { id:'s_shadow', tier:'silver', name:'暗影疾奔', desc:'拔刀瞬闪后，获得持续 2 秒 100% 移动速度加成', f:()=>{ hxFlag('shadowDash'); } },
+  { id:'s_crit',   tier:'silver', name:'暴击！', desc:'获得 20% 暴击几率', f:()=>{ hxAdd('critRaw', 0.20); } },
+  { id:'s_attr',   tier:'silver', name:'属性', desc:'获得 3 个自选属性碎片', f:()=>{ grantShards(3); } },
+  { id:'s_encore', tier:'silver', name:'安可', desc:'使用技能后返还 15% 的能量', f:()=>{ hxFlag('encore'); } },
+  { id:'s_leech',  tier:'silver', name:'血魔流', desc:'获得 0.05% 嗜血，获得 10% 最大生命值', f:()=>{ hxAdd('lifesteal', 0.0005); hxAdd('hpPct', 0.10); recalc(); P.hp = P.maxHp; } },
+  { id:'s_chance', tier:'silver', name:'最后机会', desc:'获得一次死里逃生（可以复活一次）', f:()=>{ hxAdd('revives', 1); } },
+  { id:'s_mine',   tier:'silver', name:'雷区', desc:'所有爆炸的爆炸范围 +75%，爆炸伤害 +10%', f:()=>{ hxMul('explRadius', 1.75); hxMul('explDmg', 1.10); } },
+  { id:'s_demon',  tier:'silver', name:'速度恶魔', desc:'击杀敌人时获得 5% 移动速度，持续 5 秒，最多叠加 5 层。满层时额外获得 10% 移动速度', f:()=>{ hxFlag('speedDemon'); } },
+  { id:'s_gunner', tier:'silver', name:'人型机枪', desc:'移动速度降低 50%，技能急速变为 1.5 倍', f:()=>{ hxFlag('gunner'); hxAdd('spdPct', -0.5); recalc(); } },
+  { id:'s_slowfast', tier:'silver', name:'慢就是快！', desc:'将每 1 点技能急速转化为 1% 伤害增幅，并获得 25% 伤害增幅', f:()=>{ hxFlag('hasteToDmg'); } },
+  { id:'s_money',  tier:'silver', name:'利滚利', desc:'每过 1 分钟，你的金币增加 5%', f:()=>{ hxFlag('interest'); } },
+
+  /* ---------------- 黄金 ---------------- */
+  { id:'g_upprism', tier:'gold', name:'质变：棱彩阶', desc:'获得一个随机的棱彩 Hex Tech', f:()=>{
+      const h = grantRandomHex('prism'); if (h) hxDo(() => revertHex(h.id));
+    } },
+  { id:'g_crit',   tier:'gold', name:'暴击！！', desc:'获得 25% 暴击几率和 15% 暴击伤害', f:()=>{ hxAdd('critRaw', 0.25); hxAdd('critDmg', 0.15); } },
+  { id:'g_attr',   tier:'gold', name:'属性叠属性', desc:'获得 4 个自选属性碎片，并略微提高黄金与棱彩属性碎片的概率', f:()=>{
+      grantShards(4); hxAdd('shardTierLuck', 0.25);
+    } },
+  { id:'g_leech',  tier:'gold', name:'血魔化身', desc:'获得 0.08% 嗜血，获得 15% 最大生命值', f:()=>{ hxAdd('lifesteal', 0.0008); hxAdd('hpPct', 0.15); recalc(); P.hp = P.maxHp; } },
+  { id:'g_haste',  tier:'gold', name:'火力覆盖', desc:'技能急速 +40', f:()=>{ hxAdd('haste', 40); } },
+  { id:'g_moon',   tier:'gold', name:'月光骑士', desc:'你的飞行道具可以弹射 2 次（贯穿次数 +2，且这 2 次可以重新索敌）', f:()=>{ hxSet('moon', 2); } },
+  { id:'g_fly',    tier:'gold', name:'飞天姿态', desc:'额外获得 50% 能量恢复速度，并获得主动技能「飞天姿态」：暂时无法被选中，持续 4 秒，落地时震击周围敌人造成伤害并击退他们。消耗 50 能量', f:()=>{ hxFlag('fly'); hxPush('actives', 'fly'); hxMul('energyRegen', 1.5); } },
+  { id:'g_firework', tier:'gold', name:'烟花秀', desc:'敌人死亡时会爆炸造成攻击力×3.0 的伤害，你造成的爆炸伤害提升 50%', f:()=>{ hxFlag('firework'); hxMul('explDmg', 1.5); } },
+  { id:'g_goldbullet', tier:'gold', name:'致命金币', desc:'拾取金币时会发射三颗突击步枪的子弹攻击敌人，金币掉落概率增加', f:()=>{ hxFlag('goldBullet'); hxAdd('luckDropBonus', 0.5); } },
+  { id:'g_lone',   tier:'gold', name:'孤胆英雄', desc:'移除所有死里逃生。获得 4 点基础攻击力和 4% 防御力（防御力为最终加算）；每移除 1 个死里逃生，额外获得 4 点基础攻击力和 4% 防御力。基础攻击力会被其它攻击力%增幅', f:()=>{
+      const n = P.revives; P.revives = 0;
+      hxAdd('atkFlat', 4 * (1 + n));        // 基础攻击力：会被攻击力%增幅
+      hxAdd('defFinal', 0.04 * (1 + n));    // 防御力：最终加算
+      hxFlag('lone');
+    } },
+  { id:'g_legion', tier:'gold', name:'超时空军团', desc:'每过 6 秒，随机秒杀 5 个普通敌人，并获得双倍经验', f:()=>{ hxFlag('legion'); hxMul('xpMul', 2); } },
+  { id:'g_symbio', tier:'gold', name:'共生恶魔', desc:'获得 10 点幸运。你的每点幸运也会增加怪物 1% 血量与攻击力', f:()=>{ hxAdd('luck', 10); hxFlag('symbio'); } },
+  { id:'g_archmage', tier:'gold', name:'大法师', desc:'使用任意一个主动技能后，获得 50 能量。该效果有 25 秒冷却', f:()=>{ hxFlag('archmage'); } },
+  { id:'g_coinpower', tier:'gold', name:'金钱的力量', desc:'获得主动技能「金钱的力量」：将金币以超高速射出，对路径上所有敌人造成伤害，射出的金币可以回收。该技能可持续释放', f:()=>{ hxFlag('coinPower'); hxPush('actives', 'coin'); } },
+  { id:'g_heavy',  tier:'gold', name:'重如泰山', desc:'每击杀 100 个怪物，移动速度 -0.5%，体型 +0.5%，攻击力 +2%（加算），生命 +2，并恢复 10% 最大生命值。初始获得 10 层', f:()=>{
+      hxFlag('heavy'); P.hx.heavyStacks = 10; P.hx.heavyDone = 0;
+      applyHeavyStacks(10); hxDo(() => applyHeavyStacks(-10));
+    } },
+
+  /* ---------------- 棱彩 ---------------- */
+  { id:'p_chaos',  tier:'prism', name:'质变：混沌', desc:'获得两个随机 Hex Tech，其中至少有一个是黄金及以上品质', f:()=>{
+      const a = grantRandomHex(pick(['gold', 'prism']));
+      const b = grantRandomHex(pick(['silver', 'gold', 'prism']));
+      hxDo(() => { if (a) revertHex(a.id); if (b) revertHex(b.id); });
+    } },
+  { id:'p_pandora', tier:'prism', name:'质变：潘多拉', desc:'移除已获得的全部 Hex Tech（连同其效果），然后获得「原有数量 + 1」个随机棱彩 Hex Tech', f:()=>{ pandora(); } },
+  { id:'p_dice',   tier:'prism', name:'掷骰狂人', desc:'击杀敌人有 0.25% 概率掉落自选属性碎片', f:()=>{ hxFlag('dice'); } },
+  { id:'p_choose', tier:'prism', name:'万里挑一', desc:'从所有 Hex Tech 中挑选一个', f:()=>{ openHexPicker(); } },
+  { id:'p_timestop', tier:'prism', name:'时间静止', desc:'每过 18 秒凝滞所有敌人 2 秒，自身可以造成伤害和移动且期间不受伤害，移动速度 +200%', f:()=>{ hxFlag('timestop'); } },
+  { id:'p_crit',   tier:'prism', name:'暴击！！！', desc:'获得 35% 暴击几率和 35% 暴击伤害', f:()=>{ hxAdd('critRaw', 0.35); hxAdd('critDmg', 0.35); } },
+  { id:'p_attr',   tier:'prism', name:'属性叠属性叠属性', desc:'获得 5 个自选属性碎片，提高黄金与棱彩属性碎片的概率', f:()=>{ grantShards(5); hxAdd('shardTierLuck', 0.5); } },
+  { id:'p_goldrain', tier:'prism', name:'金币雨', desc:'游戏中会随机刷新持续 5 秒的金币雨，对敌人造成其 1% 最大生命值的伤害并掉落可拾取的金币。若拥有其他金币类强化，金币雨伤害更高且更频繁', f:()=>{ hxFlag('goldRain'); } },
+  { id:'p_leech',  tier:'prism', name:'血魔降临', desc:'获得 0.1% 嗜血，获得 25% 最大生命值，并获得一次死里逃生', f:()=>{ hxAdd('lifesteal', 0.001); hxAdd('hpPct', 0.25); recalc(); P.hp = P.maxHp; hxAdd('revives', 1); } },
+  { id:'p_doll',   tier:'prism', name:'套娃', desc:'获得两次死里逃生。每次触发死里逃生复活后，体型变小 20%，移动速度加快 20%', f:()=>{ hxAdd('revives', 2); hxFlag('doll'); } },
+  { id:'p_infinite', tier:'prism', name:'无限火力', desc:'获得 60 技能急速和 50% 能量回复速度提升', f:()=>{ hxAdd('haste', 60); hxMul('energyRegen', 1.5); } },
+  { id:'p_eureka', tier:'prism', name:'尤里卡！', desc:'立刻获得 5 次选择技能词条的机会', f:()=>{ G.pendingLevels += 5; hxDo(() => { G.pendingLevels = Math.max(0, G.pendingLevels - 5); }); } },
+  { id:'p_artboom', tier:'prism', name:'艺术就是爆炸', desc:'所有技能在首次命中敌人时都会产生爆炸，造成 50% 原技能的伤害。所有爆炸伤害 +50%，范围 +25%', f:()=>{ hxFlag('artBoom'); hxMul('explDmg', 1.5); hxMul('explRadius', 1.25); } },
+  { id:'p_basic',  tier:'prism', name:'回归基本功', desc:'现在最多可以拥有 3 个技能（若已超过 3 个，会随机移除 2 个技能和它们的强化），技能急速 +100，攻击力 +100%', f:()=>{
+      P.maxSkills = 3;
+      const owned = Object.keys(P.skills).filter(k => k !== 'rifle');
+      const removed = [];
+      while (Object.keys(P.skills).length > 3 && owned.length) {
+        const rm = owned.splice(Math.floor(Math.random() * owned.length), 1)[0];
+        removed.push(rm);
+        delete P.skills[rm];
+        for (const id in P.skillLv) if (MASTERY_BY_ID[id] && MASTERY_BY_ID[id].sk === rm) delete P.skillLv[id];
+      }
+      hxAdd('haste', 100); hxAdd('atkPct', 1.0);
+      hxDo(() => { P.maxSkills = MAX_SKILLS; });   // 已移除的技能不恢复
+    } },
+  { id:'p_final',  tier:'prism', name:'最终形态', desc:'使用主动技能后的 5 秒内，获得 50 技能急速、50% 攻击力和 50% 最大生命值的屏障', f:()=>{ hxFlag('final'); } },
+  { id:'p_feather', tier:'prism', name:'轻如鸿毛', desc:'每击杀 100 个怪物，体型 -0.5%，移动速度和能量回复速度 +1%，技能急速 +1。初始获得 25 层', f:()=>{
+      hxFlag('feather'); P.hx.featherStacks = 25; P.hx.featherDone = 0;
+      applyFeatherStacks(25); hxDo(() => applyFeatherStacks(-25));
+    } }
+];
+const HEX_BY_ID = {};
+for (const h of HEXES) HEX_BY_ID[h.id] = h;
+const hexesOfTier = (t) => HEXES.filter(h => h.tier === t);
+
+/* 抽取 Hex 品阶：基础 30/40/30，幸运提高黄金与棱彩概率 */
+function rollHexTier() {
+  const boost = 1 + 0.05 * P.luck + (P.hx.tierLuck || 0) * 1;
+  const w = {
+    silver: HEX_TIERS.silver.base,
+    gold: HEX_TIERS.gold.base * boost,
+    prism: HEX_TIERS.prism.base * boost
+  };
+  const total = w.silver + w.gold + w.prism;
+  let r = Math.random() * total;
+  if ((r -= w.silver) < 0) return 'silver';
+  if ((r -= w.gold) < 0) return 'gold';
+  return 'prism';
+}
+function grantRandomHex(tier) {
+  const pool = hexesOfTier(tier).filter(h => !P.hexTaken[h.id]);
+  if (!pool.length) return null;
+  const h = pick(pool);
+  applyHex(h);
+  return h;
+}
+/* ==========================================================================
+   Hex 效果账本
+   每个 Hex 生效时记录它造成的「可撤销改动」，这样「质变：潘多拉」之类的效果
+   才能真正把已获得的 Hex 移除（而不只是叠加新的）。
+   ========================================================================== */
+function ledgerAdd(fn) {
+  if (!G.hexApplying) return;
+  (P.hexLedger[G.hexApplying] = P.hexLedger[G.hexApplying] || []).push(fn);
+}
+function hxAdd(field, amount) { P[field] += amount; ledgerAdd(() => { P[field] -= amount; }); }
+function hxMul(field, k)       { P[field] *= k;      ledgerAdd(() => { P[field] /= k; }); }
+function hxFlag(name)          { P.hx[name] = 1;     ledgerAdd(() => { delete P.hx[name]; }); }
+function hxSet(name, val)      { P.hx[name] = val;   ledgerAdd(() => { delete P.hx[name]; }); }
+function hxPush(arr, val)      { P[arr].push(val);   ledgerAdd(() => { const i = P[arr].indexOf(val); if (i >= 0) P[arr].splice(i, 1); }); }
+function hxDo(fn)              { ledgerAdd(fn); }
+
+/* 撤销某个 Hex 的全部效果，并把它放回可抽取池 */
+function revertHex(id) {
+  const list = P.hexLedger[id] || [];
+  for (let i = list.length - 1; i >= 0; i--) { try { list[i](); } catch (e) {} }
+  delete P.hexLedger[id];
+  delete P.hexTaken[id];
+  const k = P.hexes.indexOf(id);
+  if (k >= 0) P.hexes.splice(k, 1);
+}
+function applyHex(h) {
+  if (P.hexTaken[h.id]) return;
+  P.hexTaken[h.id] = 1;
+  P.hexes.push(h.id);
+  P.hexLedger[h.id] = [];
+  const prev = G.hexApplying;
+  G.hexApplying = h.id;
+  try { h.f(); } finally { G.hexApplying = prev; }
+  recalc();
+  if (!h.noToast) toast('⬢ ' + HEX_TIERS[h.tier].name + ' · ' + h.name, 2000);
+}
+/* 潘多拉：移除【已获得的全部 Hex】（连同其效果，潘多拉自身也被消耗），
+   然后获得「原有数量 + 1」个随机棱彩 Hex。
+   例：持有 2 个 Hex 时选取 → 移除这 2 个 → 获得 2+1 = 3 个随机棱彩。 */
+function pandora() {
+  const owned = P.hexes.filter(id => id !== 'p_pandora');
+  const n = owned.length;
+  for (const id of owned) revertHex(id);
+  revertHex('p_pandora');                 // 潘多拉自身也被消耗
+  recalc();
+  P.hp = Math.min(P.hp, P.maxHp);
+  const pool = hexesOfTier('prism').filter(h => !P.hexTaken[h.id] && h.id !== 'p_pandora');
+  let got = 0;
+  for (let i = 0; i < n + 1 && pool.length; i++) {
+    const h = pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
+    h.noToast = true;
+    applyHex(h);
+    got++;
+  }
+  if (got < n + 1) toast('⬢ 潘多拉：棱彩 Hex 已抽完，本次只重铸了 ' + got + ' 个', 2600);
+  else toast('⬢ 潘多拉：移除了 ' + n + ' 个旧 Hex，重铸为 ' + got + ' 个随机棱彩', 2600);
+}
+
+/* ---- 局外永久升级：每级数值写死在 vals 里（等级 = 取第几项） ---- */
+const pct = (v) => '+' + Math.round(v * 100) + '%';
+const META_UPGRADES = [
+  { id:'m_atk',    name:'攻击增幅',     vals:[0.08, 0.16, 0.24, 0.32, 0.40], fmt:v=>pct(v)+' 攻击力',        base:150, growth:1.55 },
+  { id:'m_def',    name:'防御增幅',     vals:[0.07, 0.13, 0.18, 0.22, 0.25], fmt:v=>pct(v)+' 防御力',        base:138, growth:1.55 },
+  { id:'m_block',  name:'格挡增幅',     vals:[1, 2, 3, 4, 5],                 fmt:v=>'+'+v+' 格挡值',          base:163, growth:1.55 },
+  { id:'m_crit',   name:'暴击增幅',     vals:[0.02, 0.04, 0.06, 0.08, 0.10], fmt:v=>pct(v)+' 暴击率',        base:138, growth:1.55 },
+  { id:'m_critd',  name:'暴击伤害增幅', vals:[0.04, 0.08, 0.12, 0.16, 0.20], fmt:v=>pct(v)+' 暴击伤害',      base:150, growth:1.55 },
+  { id:'m_haste',  name:'技能急速增幅', vals:[5, 10, 15, 20, 25],             fmt:v=>'+'+v+' 技能急速',        base:175, growth:1.55 },
+  { id:'m_pick',   name:'拾取范围增幅', vals:[0.05, 0.10, 0.15, 0.20, 0.25], fmt:v=>pct(v)+' 拾取范围',      base:113, growth:1.55 },
+  { id:'m_luck',   name:'幸运增幅',     vals:[1, 2, 3, 4, 5],                 fmt:v=>'+'+v+' 幸运',            base:163, growth:1.55 },
+  { id:'m_regen',  name:'生命恢复增幅', vals:[0.10, 0.20, 0.30, 0.40, 0.50], fmt:v=>'+'+v.toFixed(2)+' 生命/秒', base:125, growth:1.55 },
+  { id:'m_hp',     name:'生命增幅',     vals:[10, 20, 30, 40, 50],            fmt:v=>'+'+v+' 基础生命值',      base:138, growth:1.55 },
+  { id:'m_debuff', name:'负面效果增幅', vals:[0.05, 0.10, 0.15, 0.20, 0.25], fmt:v=>pct(v)+' 负面效果',      base:125, growth:1.55 },
+  { id:'m_energy', name:'能量恢复增幅', vals:[0.05, 0.10, 0.15, 0.20, 0.25], fmt:v=>'+'+v.toFixed(2)+' 能量/秒', base:188, growth:1.55 },
+  { id:'m_spd',    name:'移动速度增幅', vals:[0.02, 0.04, 0.06, 0.08, 0.10], fmt:v=>pct(v)+' 移动速度',      base:150, growth:1.55 },
+  { id:'m_revive', name:'死里逃生',     vals:[1, 2],                            fmt:v=>'复活 '+v+' 次',           base:750, growth:2.20 },
+  { id:'m_leech',  name:'嗜血',         vals:[0.0001, 0.0002, 0.0003, 0.0004, 0.0005], fmt:v=>'+'+(v*100).toFixed(2)+'% 嗜血', base:250, growth:1.70 }
+];
+const META_BY_ID = {};
+for (const u of META_UPGRADES) META_BY_ID[u.id] = u;
+const upgradeCost = (u, lv) => Math.round(u.base * Math.pow(u.growth, lv));
+// 取局外某条升级在当前等级下的累计数值
+function metaVal(id) {
+  const lv = (META.up && META.up[id]) || 0;
+  const u = META_BY_ID[id];
+  return (lv > 0 && u) ? u.vals[Math.min(lv, u.vals.length) - 1] : 0;
+}
+
+/* ==========================================================================
+   3. 存档（localStorage 持久化）
+   ========================================================================== */
+const SAVE_KEY = 'vs_meta_save_v1';
+let META = { gold: 0, up: {}, best: 0, runs: 0, fish: 0, wins: 0, startCurse: 0 };
+function loadMeta() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (raw) {
+      const d = JSON.parse(raw);
+      META.gold = d.gold || 0;
+      META.up = d.up || {};
+      META.best = d.best || 0;
+      META.runs = d.runs || 0;
+      META.fish = d.fish || 0;
+      META.wins = d.wins || 0;
+      META.startCurse = d.startCurse || 0;
+      // 清理已废弃的升级条目（旧版本存档兼容：金币保留，失效条目丢弃）
+      for (const k in META.up) if (!META_BY_ID[k]) delete META.up[k];
+    }
+  } catch (e) { /* 隐私模式忽略 */ }
+}
+let saveTick = 0;
+function saveMeta() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(META)); } catch (e) {}
+}
+
+/* ==========================================================================
+   4. 画布与相机
+   ========================================================================== */
+const cvs = $('#game');
+const ctx = cvs.getContext('2d');
+const mini = $('#mini');
+const mctx = mini.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+
+/* 画面参考比例：与电脑端一致，保证任何屏幕都能「完整」看到同一片视野 */
+const VIEW_ASPECT = 16 / 9;
+const VIEW = { x: 0, y: 0 };
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // 等比缩放，让 16:9 的完整画面放进屏幕（横屏/竖屏都不裁切，多余部分留黑边）
+  let w = vw, h = vw / VIEW_ASPECT;
+  if (h > vh) { h = vh; w = vh * VIEW_ASPECT; }
+  W = Math.round(w); H = Math.round(h);
+  VIEW.x = Math.round((vw - W) / 2);
+  VIEW.y = Math.round((vh - H) / 2);
+  const st = document.documentElement.style;
+  st.setProperty('--vx', VIEW.x + 'px');
+  st.setProperty('--vy', VIEW.y + 'px');
+  st.setProperty('--vw', W + 'px');
+  st.setProperty('--vh', H + 'px');
+  st.setProperty('--vbottom', Math.max(0, vh - VIEW.y - H) + 'px');
+  st.setProperty('--vright', Math.max(0, vw - VIEW.x - W) + 'px');
+  cvs.width = Math.floor(W * DPR); cvs.height = Math.floor(H * DPR);
+  cvs.style.width = W + 'px'; cvs.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  // 竖屏 + 触屏：在黑边区域提示可以横屏（不遮挡游戏）
+  const tip = document.getElementById('rotateTip');
+  if (tip) {
+    const portrait = vh > vw * 1.05;
+    const touch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+    tip.classList.toggle('on', portrait && touch);
+    tip.style.top = Math.max(6, VIEW.y / 2 - 12) + 'px';
+  }
+}
+/* 屏幕坐标 → 游戏画面坐标（画布已居中偏移，触控必须换算） */
+const toVX = (cx) => cx - VIEW.x;
+const toVY = (cy) => cy - VIEW.y;
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+resize();
+
+/* ==========================================================================
+   5. 游戏状态
+   ========================================================================== */
+const G = {
+  running: false, paused: false, over: false, win: false,
+  elapsed: 0, spawnT: 0, itemT: 0, nextElite: ELITE_INTERVAL,
+  eliteCount: 0, bossSpawned: false, boss: null,
+  freeze: 0, shake: 0, flashT: 0,
+  enemies: [], shots: [], beams: [], iceTrails: [], ebullets: [], zones: [],
+  pickups: [], particles: [], texts: [], trail: [],
+  hexQueue: [], hexPick: null, hexOptions: null, chain: 0,
+  flameCd: 0, landFx: 0, speed2: false, hexApplying: null,
+  shardQueue: [], shardPick: null, dmg: {}, killStat: {}, src: 'other',
+  kills: 0, goldRun: 0, pendingLevels: 0, levelUpOpen: false
+};
+
+const P = {};
+
+/* 重如泰山 / 轻如鸿毛：每 100 击杀累积一层（全部走加算池）
+   重如泰山：移速 -0.5% / 体型 +0.5% / 攻击力 +2% / 生命 +2 / 回复 10% 最大生命
+   轻如鸿毛：体型 -0.5% / 移速 +1% / 能量回复 +1% / 技能急速 +1 */
+function applyHeavyStacks(n) {
+  if (!n) return;
+  P.spdPct -= 0.005 * n;
+  P.sizePct += 0.005 * n;
+  P.atkPct += 0.02 * n;          // 加算：100 层 = +200% 基础攻击力
+  P.hpFlat += 2 * n;
+  recalc();
+  if (n > 0) P.hp = Math.min(P.maxHp, P.hp + P.maxHp * 0.10);   // 撤销时不回血
+}
+function applyFeatherStacks(n) {
+  if (!n) return;
+  P.sizePct -= 0.005 * n;
+  P.spdPct += 0.01 * n;
+  for (let i = 0; i < Math.abs(n); i++) P.energyRegen *= (n > 0 ? 1.01 : 1 / 1.01);
+  P.haste += n;
+  recalc();
+}
+
+/* 派生属性统一重算
+   【第 7 项】百分比属性加成全部【加算】并基于基础值：
+     攻击力 = 20 × (1 + Σ攻击%)        生命 = 100 × (1 + Σ生命%) + 固定生命
+     移速   = 6 点 × (1 + Σ移速%)      拾取 = 95 × (1 + Σ拾取%)
+   例外：防御力按此前需求仍为【乘算减伤】；标注「独立乘区」的效果（孤胆英雄 / 唯快不破 /
+   慢就是快 / 核能电磁）保持独立乘算 */
+const BASE_ATTACK = 20, BASE_HP = 100, BASE_PICKUP = 95;
+function recalc() {
+  P.atkPct = P.atkPct || 0; P.atkTempPct = P.atkTempPct || 0;
+  P.hpPct = P.hpPct || 0; P.hpFlat = P.hpFlat || 0;
+  P.spdPct = P.spdPct || 0; P.pickPct = P.pickPct || 0;
+  P.sizePct = P.sizePct || 0;
+  // 加算属性：固定攻击力并入基础值后再乘百分比（所以「孤胆英雄」的基础攻击力也会被攻击%增幅）
+  P.attack = (BASE_ATTACK + P.atkFlat) * (1 + P.atkPct + P.atkTempPct);
+  // 防御力：各个来源乘算，最后再减去「最终加算」的防御力（孤胆英雄），最低保留 5% 伤害
+  P.defMulFinal = Math.max(0.05, P.defMul - (P.defFinal || 0));
+  P.maxHp = Math.max(1, BASE_HP * (1 + P.hpPct) + P.hpFlat);
+  P.pickup = BASE_PICKUP * (1 + P.pickPct);
+  // 移速最多降低至 0（重如泰山 / 人型机枪等叠加也不会变成负值）
+  P.moveSpd = Math.max(0, BASE_MOVE * (1 + P.spdPct + (P.buffSpeedT > 0 ? P.buffSpeed : 0)));
+  P.hp = Math.min(P.hp, P.maxHp);
+  P.sizeMul = Math.max(0.35, 1 + P.sizePct);
+  P.r = 16 * P.sizeMul;
+  // 移速：属性点 -> 像素/秒
+  P.speed = P.moveSpd * SPEED_PER_POINT;
+  // 防御力：多个来源【乘算】而非加算
+  P.defMul = 1;
+  for (const d of P.defList) P.defMul *= (1 - d);
+  // 暴击率溢出：超过 100% 的部分等额转换为暴击伤害
+  const over = P.critRaw - 1;
+  if (over > 0) { P.crit = 1; P.critDmgTotal = P.critDmg + over; }
+  else { P.crit = P.critRaw; P.critDmgTotal = P.critDmg; }
+  // 技能急速：总急速（「人型机枪」使急速变为 1.5 倍）
+  P.hasteT = P.haste * (P.hx && P.hx.gunner ? 1.5 : 1);
+  P.cdMul = 100 / (100 + P.hasteT);
+  P.hastePct = P.hasteT / (P.hasteT + 100);
+  // 诅咒：每点 +10% 经验/金币掉落数量，+5% 怪物血量/数量/攻击力
+  P.dropScale = 1 + 0.10 * P.curse;
+  P.enemyScale = 1 + 0.05 * P.curse;
+  if (P.hx && P.hx.symbio) P.enemyScale *= 1 + 0.01 * P.luck;   // 共生恶魔
+  // 幸运：掉落率提升 + 升级 3 选 1 变 4 选 1 的概率
+  P.luckDrop = 1 + 0.05 * P.luck + (P.luckDropBonus || 0);
+  P.p4 = Math.min(0.80, P.luck / (P.luck + 25));
+  // Hex 全局伤害乘区
+  let dm = 1;
+  if (P.hx) {
+    if (P.hx.spdDmg) dm *= 1 + clamp((P.speed / BASE_SPEED - 1) * 0.5, 0, 0.15);      // 唯快不破
+    if (P.hx.hasteToDmg) dm *= 1 + (25 + P.hasteT) / 100;                              // 慢就是快！
+  }
+  P.globalDmg = dm;                       // 孤胆英雄已改为基础攻击力 + 最终加算防御力
+}
+
+/* 创建一个技能实例（运行时状态） */
+function newSkillState(id) {
+  const def = SKILL_DEFS[id];
+  return {
+    id, def,
+    lvl: 0,               // 已学词条数
+    haste: 0,             // 独立技能急速（与总急速加算）
+    cdT: def.base ? 0.35 : 0.5,
+    volley: 1, targets: def.targets, dmgAdd: 0, pierce: def.pierce,
+    finalMul: 1, bounce: 0, split: 0, splitKeep: 0.5, widthMul: 1,
+    burnDps: 0, radiusMul: 1, count: 1, sizeMul: 1, rotMul: 1,
+    maxLayers: 1, boomAdd: 0, invAdd: 0,
+    flags: {}, ang: 0, beeAng: 0, subT: 0, ionT: 0, layer: 0
+  };
+}
+function learnSkill(id) {
+  if (P.skills[id]) return;
+  P.skills[id] = newSkillState(id);
+  const st = P.skills[id];
+  if (id === 'frostarmor') st.layer = 1;
+  if (id === 'laser') st.layer = 1;
+}
+
+function resetPlayer() {
+  P.x = 0; P.y = 0; P.r = 16;
+  P.level = 1; P.xp = 0; P.xpNeed = xpNeeded(1);
+
+  /* --- 主角基础属性（初始值见需求二 / 百分比加算见第 7 项） --- */
+  P.atkPct = metaVal('m_atk');    // 攻击力% （加算池）
+  P.atkTempPct = 0;               // 临时攻击力%（最终形态）
+  P.atkFlat = 0;
+  P.hpPct = 0;                    // 生命%
+  P.hpFlat = metaVal('m_hp');     // 固定生命
+  P.spdPct = metaVal('m_spd');    // 移速%
+  P.pickPct = metaVal('m_pick');  // 拾取范围%
+  P.sizePct = 0;                  // 体型%（重如泰山 / 轻如鸿毛）
+  P.maxHp = BASE_HP + P.hpFlat;
+  P.hp = P.maxHp;
+  P.attack = BASE_ATTACK * (1 + P.atkPct);
+  P.defList = [];                             // 防御力（乘算来源列表）
+  if (metaVal('m_def') > 0) P.defList.push(metaVal('m_def'));
+  P.block = metaVal('m_block');               // 格挡值（固定减伤）
+  P.lifesteal = metaVal('m_leech');           // 嗜血
+  P.haste = metaVal('m_haste');               // 技能急速
+  P.critRaw = 0.25 + metaVal('m_crit');       // 暴击率（原始值，可溢出）
+  P.critDmg = 2.0 + metaVal('m_critd');       // 暴击伤害（200% 起）
+  P.pickup = BASE_PICKUP * (1 + P.pickPct);   // 拾取范围
+  P.luck = metaVal('m_luck');                 // 幸运
+  P.curse = (META.wins > 0 ? (META.startCurse || 0) : 0);   // 诅咒（含「添火」自选层数）
+  P.moveSpd = BASE_MOVE * (1 + P.spdPct);     // 移速（初始 6，含局外增幅）
+  P.regen = metaVal('m_regen');               // 生命恢复
+  P.energyRegen = 1 + metaVal('m_energy');    // 能量恢复（初始 1/秒）
+  P.debuff = metaVal('m_debuff');             // 负面效果时长加成
+
+  /* --- 主动技能：拔刀瞬闪 --- */
+  P.maxEnergy = ACTIVE.maxEnergy;
+  P.energy = ACTIVE.startEnergy;
+  P.invT = 0;                                 // 无敌剩余时间
+
+  /* --- 技能系统 --- */
+  P.skills = {};                // 技能实例（最多 5 个）
+  P.skillLv = {};               // 已学词条等级
+  P.maxSkills = MAX_SKILLS;     // 「回归基本功」会改为 3
+  learnSkill('rifle');          // 突击步枪为初始技能
+
+  /* --- Hex Tech 状态 --- */
+  P.hx = {};                    // Hex 开关集合
+  P.hexes = [];                 // 已获得 Hex id
+  P.hexTaken = {};
+  P.actives = ['blink'];        // 主动技能（最多 1 + 2）
+  P.activeCd = {};              // 主动技能冷却（大法师用）
+  P.revives = metaVal('m_revive');   // 死里逃生次数（局外强化）
+  P.explRadius = 1;             // 爆炸范围倍率
+  P.explDmg = 1;                // 爆炸伤害倍率
+  P.xpMul = 1;                  // 经验倍率
+  P.luckDropBonus = 0;          // 额外金币掉率
+  P.defFinal = 0;               // 最终加算防御力（孤胆英雄）
+  P.hexLedger = {};             // 每个 Hex 的可撤销改动账本
+  P.shield = 0; P.shieldT = 0; P.shieldInv = 0;
+  P.buffSpeed = 0; P.buffSpeedT = 0; P.speedStacks = 0; P.speedStackT = 0;
+  P.finalT = 0; P.archCd = 0; P.timeStopT = 0; P.timeStopFx = 0;
+  P.legionT = 6; P.goldRainT = 25; P.goldRainDur = 0; P.goldRainX = 0; P.goldRainY = 0;
+  P.interestT = 60; P.epiphany = 0;
+  P.goldGain = 1;
+  P.aimX = 1; P.aimY = 0;
+  P.vx = 0; P.vy = 0;
+  P.hurtT = 0;
+  P.flyT = 0; P.coinOn = false; P.coinT = 0; P.zeroPending = 0;
+  P.chillT = 0; P.auraAcc = 0; P.dash = null;
+  P.sizeMul = 1;
+  P.dash = null;
+  recalc();
+  P.hp = P.maxHp;
+}
+
+function resetGame() {
+  G.running = true; G.paused = false; G.over = false; G.win = false;
+  G.elapsed = 0; G.spawnT = 0.4; G.itemT = 22; G.nextElite = ELITE_INTERVAL;
+  G.eliteCount = 0; G.bossSpawned = false; G.boss = null;
+  G.freeze = 0; G.shake = 0; G.flashT = 0;
+  G.enemies.length = 0; G.shots.length = 0; G.beams.length = 0; G.iceTrails.length = 0;
+  G.ebullets.length = 0; G.zones.length = 0;
+  G.hexQueue.length = 0; G.hexPick = null; G.hexOptions = null; G.chain = 0;
+  G.shardQueue.length = 0; G.shardPick = null; G.dmg = {}; G.killStat = {}; G.src = 'other';
+  G.flameCd = 0; G.landFx = 0;
+  $('#btnSpeed').classList.toggle('on', !!G.speed2);
+  G.pickups.length = 0; G.particles.length = 0; G.texts.length = 0;
+  G.trail.length = 0;
+  G.kills = 0; G.goldRun = 0; G.pendingLevels = 0; G.levelUpOpen = false;
+  resetPlayer();
+  $('#bossWrap').classList.remove('on');
+  updateGoldText();
+}
+
+/* ==========================================================================
+   6. 输入：键盘 + 触屏摇杆
+   ========================================================================== */
+const keys = Object.create(null);
+window.addEventListener('keydown', (e) => {
+  const k = (e.key || '').toLowerCase();
+  keys[k] = true;
+  if (k === 'p' || k === 'escape') { e.preventDefault(); togglePause(); }
+  if (k === ' ' || k.startsWith('arrow')) e.preventDefault();
+  // F = 切换 2 倍速
+  if (k === 'f' && !e.repeat && G.running && !G.over) { e.preventDefault(); toggleSpeed2(); }
+  // 空格 / J / K = 释放主动技能
+  if (!e.repeat && G.running && !G.paused && !G.over) {
+    if (k === ' ') castActive('blink');
+    else if (k === 'j') castActive('fly');
+    else if (k === 'k') castActive('coin');
+  }
+  // 数字键 1-4：升级选卡 / Hex 三选一 / 属性碎片三选一 均可键盘选择
+  if (k === '1' || k === '2' || k === '3' || k === '4') {
+    const idx = parseInt(k, 10) - 1;
+    let sel = null;
+    if (G.levelUpOpen) sel = '#cardBox .card';
+    else if (G.hexPick) sel = '#hexBox .card';
+    else if (G.shardPick) sel = '#shardBox .card';
+    if (sel) {
+      const cards = document.querySelectorAll(sel);
+      if (cards[idx]) cards[idx].click();
+    }
+  }
+});
+window.addEventListener('keyup', (e) => { keys[(e.key || '').toLowerCase()] = false; });
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+const J = { on: false, id: null, ox: 0, oy: 0, cx: 0, cy: 0, nx: 0, ny: 0, mag: 0 };
+const JOY_R = 62;
+
+function joyStart(x, y, id) { J.on = true; J.id = id; J.ox = x; J.oy = y; J.cx = x; J.cy = y; J.nx = 0; J.ny = 0; J.mag = 0; }
+function joyMove(x, y) {
+  if (!J.on) return;
+  let dx = x - J.ox, dy = y - J.oy;
+  const d = Math.hypot(dx, dy);
+  const m = Math.min(d, JOY_R);
+  if (d > 0.0001) { J.nx = dx / d; J.ny = dy / d; } else { J.nx = 0; J.ny = 0; }
+  J.mag = m / JOY_R;
+  J.cx = J.ox + J.nx * m; J.cy = J.oy + J.ny * m;
+}
+function joyEnd() { J.on = false; J.id = null; J.nx = 0; J.ny = 0; J.mag = 0; }
+
+function onTouchStart(e) {
+  if (!G.running || G.paused) return;
+  for (const t of e.changedTouches) {
+    if (J.on) continue;
+    joyStart(toVX(t.clientX), toVY(t.clientY), t.identifier);
+  }
+  e.preventDefault();
+}
+function onTouchMove(e) {
+  for (const t of e.changedTouches) if (J.on && t.identifier === J.id) joyMove(toVX(t.clientX), toVY(t.clientY));
+  e.preventDefault();
+}
+function onTouchEnd(e) {
+  for (const t of e.changedTouches) if (J.on && t.identifier === J.id) joyEnd();
+  e.preventDefault();
+}
+cvs.addEventListener('touchstart', onTouchStart, { passive: false });
+cvs.addEventListener('touchmove', onTouchMove, { passive: false });
+cvs.addEventListener('touchend', onTouchEnd, { passive: false });
+cvs.addEventListener('touchcancel', onTouchEnd, { passive: false });
+// 桌面端可用鼠标拖拽模拟摇杆（方便调试）
+let mouseDown = false;
+cvs.addEventListener('mousedown', (e) => { if (G.running && !G.paused) { mouseDown = true; joyStart(toVX(e.clientX), toVY(e.clientY), 'm'); } });
+window.addEventListener('mousemove', (e) => { if (mouseDown) joyMove(toVX(e.clientX), toVY(e.clientY)); });
+window.addEventListener('mouseup', () => { if (mouseDown) { mouseDown = false; joyEnd(); } });
+
+/* ==========================================================================
+   7. 空间网格（敌人分离 / 碰撞加速）
+   ========================================================================== */
+const CELL = 80;
+let grid = new Map();
+function buildGrid() {
+  grid.clear();
+  for (const e of G.enemies) {
+    const k = Math.floor(e.x / CELL) + ',' + Math.floor(e.y / CELL);
+    let a = grid.get(k);
+    if (!a) { a = []; grid.set(k, a); }
+    a.push(e);
+  }
+}
+const _scratch = [];
+function queryNear(x, y, r) {
+  _scratch.length = 0;
+  const c0 = Math.floor((x - r) / CELL), c1 = Math.floor((x + r) / CELL);
+  const r0 = Math.floor((y - r) / CELL), r1 = Math.floor((y + r) / CELL);
+  for (let cx = c0; cx <= c1; cx++) {
+    for (let cy = r0; cy <= r1; cy++) {
+      const a = grid.get(cx + ',' + cy);
+      if (a) for (let i = 0; i < a.length; i++) _scratch.push(a[i]);
+    }
+  }
+  return _scratch;
+}
+
+/* ==========================================================================
+   8. 粒子 / 文字
+   ========================================================================== */
+function burst(x, y, color, n, spd, size, life) {
+  if (G.particles.length > MAX_PARTICLES) return;
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, TAU), s = rand(spd * 0.3, spd);
+    G.particles.push({
+      x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      life: rand(life * 0.55, life), max: life,
+      size: rand(size * 0.55, size), color, drag: 0.9
+    });
+  }
+}
+function ring(x, y, color, n, radius, size) {
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TAU;
+    G.particles.push({
+      x: x + Math.cos(a) * radius, y: y + Math.sin(a) * radius,
+      vx: Math.cos(a) * 120, vy: Math.sin(a) * 120,
+      life: 0.5, max: 0.5, size, color, drag: 0.9
+    });
+  }
+}
+function floatText(x, y, text, color) {
+  if (G.texts.length > 60) G.texts.shift();
+  G.texts.push({ x, y, text, color, life: 0.95, max: 0.95 });
+}
+function toast(msg, ms) {
+  const box = $('#toasts');
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 420); }, ms || 1500);
+}
+
+/* ==========================================================================
+   9. 生成：普通怪 / 精英 / Boss / 掉落 / 道具
+   ========================================================================== */
+function spawnEnemy(type, dist, angle) {
+  if (G.enemies.length >= MAX_ENEMIES) return null;
+  const t = TYPES[type];
+  const a = angle === undefined ? rand(0, TAU) : angle;
+  const d = dist === undefined ? Math.max(W, H) * 0.62 + rand(60, 220) : dist;
+  const hp = t.hp * hpScale(G.elapsed) * P.enemyScale * ENEMY_HP_MUL;   // 总生命 +25%
+  const atk = atkScale(G.elapsed);                         // 攻击随时间成长
+  const e = {
+    x: P.x + Math.cos(a) * d, y: P.y + Math.sin(a) * d,
+    r: t.r, type: t.key, shape: t.shape, color: t.color,
+    hp, maxHp: hp, dmg: t.dmg * atk * P.enemyScale,        // 诅咒：怪物攻击 +5%/点
+    sf: t.sf, speed: ENEMY_REF_SPEED * ENEMY_SPEED_RATE * t.sf, // 怪物移速 = 参照速度 × 70%（147）
+    xp: t.xp, gold: t.gold, bdmg: (t.bdmg || 8) * atk * P.enemyScale,
+    ranged: !!t.ranged, shotT: rand(1.2, 2.6),
+    hitT: 0, contactT: 0, slowT: 0, slowMul: 0, vulnT: 0, vulnMul: 0,
+    frozenT: 0, paralyzeT: 0, burnT: 0, burnDps: 0, burnHpPct: 0, shockT: 0,
+    frostStacks: 0, frostT: 0, kbVX: 0, kbVY: 0, droneT: 0, orbT: 0,
+    rot: rand(0, TAU), rotV: rand(-1.6, 1.6), flash: 0,
+    elite: false, boss: false
+  };
+  G.enemies.push(e);
+  return e;
+}
+function pickType() {
+  const t = G.elapsed;
+  const pool = [];
+  for (const k in TYPES) {
+    const d = TYPES[k];
+    if (d.from && t < d.from) continue;
+    pool.push([k, d.w]);
+  }
+  let total = 0; for (const p of pool) total += p[1];
+  let r = Math.random() * total;
+  for (const p of pool) { r -= p[1]; if (r <= 0) return p[0]; }
+  return 'grunt';
+}
+
+/* ---- 5 种精英，每种 2 个技能；登场时随机抽取一种 ---- */
+const ELITE_TYPES = [
+  { id:'void',    name:'虚空守望者', shape:'hex',     color:'#ffd54a', ab:['ring', 'blink'] },
+  { id:'lava',    name:'熔岩巨兽',   shape:'square',  color:'#ff7b47', ab:['nova', 'aura'] },
+  { id:'frost',   name:'寒霜执政官', shape:'penta',   color:'#8fd3ff', ab:['spikes', 'frostnova'] },
+  { id:'thunder', name:'雷霆使者',   shape:'diamond', color:'#ffe066', ab:['chain', 'field'] },
+  { id:'flesh',   name:'血肉吞噬者', shape:'tri',     color:'#c86bff', ab:['summon', 'drain'] }
+];
+function abInit(ids, first) {
+  const o = {};
+  ids.forEach((id, i) => { o[id] = first + i * 2.2; });
+  return o;
+}
+function spawnElite() {
+  // 精英必须登场（不因同屏上限被吞掉），因此不设上限检查；实测同屏峰值已远低于上限
+  G.eliteCount++;
+  const a = rand(0, TAU);
+  const d = Math.max(W, H) * 0.55 + 120;
+  const hp = 300 * bigHpScale(G.elapsed) * (1 + 0.18 * (G.eliteCount - 1)) * P.enemyScale * ENEMY_HP_MUL * ELITE_HP_MUL;
+  const ty = pick(ELITE_TYPES);
+  const e = {
+    x: P.x + Math.cos(a) * d, y: P.y + Math.sin(a) * d,
+    r: 34, type: 'elite', shape: ty.shape, color: ty.color,
+    eliteKind: ty.id, eliteName: ty.name,
+    hp, maxHp: hp, dmg: (16 + G.eliteCount * 2) * bigAtkScale(G.elapsed) * P.enemyScale,
+    sf: 1.0, speed: ENEMY_REF_SPEED * ENEMY_SPEED_RATE * 1.0,
+    xp: 60, gold: 12, ranged: false, shotT: 2.5, bdmg: 0,
+    hitT: 0, contactT: 0, slowT: 0, slowMul: 0, vulnT: 0, vulnMul: 0,
+    frozenT: 0, paralyzeT: 0, burnT: 0, burnDps: 0, burnHpPct: 0, shockT: 0,
+    frostStacks: 0, frostT: 0, kbVX: 0, kbVY: 0, droneT: 0, orbT: 0,
+    rot: 0, rotV: 0.9, flash: 0, elite: true, boss: false,
+    ab: abInit(ty.ab, 3.0), dashT: 0, dashX: 0, dashY: 0
+  };
+  G.enemies.push(e);
+  toast('⚠ 精英「' + ty.name + '」降临！', 2000);
+  ring(e.x, e.y, ty.color, 26, 60, 5);
+}
+
+function spawnBoss() {
+  // 需求 6：清屏场上所有怪物
+  for (const e of G.enemies) burst(e.x, e.y, e.color, 7, 190, 4, 0.7);
+  G.enemies.length = 0;
+  G.ebullets.length = 0;
+  G.shake = 22; G.flashT = 0.55;
+  // 生成 Boss
+  const a = rand(0, TAU);
+  const e = {
+    x: P.x + Math.cos(a) * 520, y: P.y + Math.sin(a) * 520,
+    r: 68, type: 'boss', shape: 'star', color: '#ff2f6d',
+    hp: (90000 + G.elapsed * 380) * P.enemyScale * ENEMY_HP_MUL * BOSS_HP_MUL, maxHp: 0,   // Boss 生命（按平均 DPS 校准，约 25~60 秒）
+    dmg: 22 * bigAtkScale(G.elapsed) * P.enemyScale,          // Boss 攻击成长 +100%
+    sf: 0.95, speed: ENEMY_REF_SPEED * ENEMY_SPEED_RATE * 0.95,
+    xp: 500, gold: 220, ranged: true, shotT: 2.2, bdmg: 0,
+    hitT: 0, contactT: 0, slowT: 0, slowMul: 0, vulnT: 0, vulnMul: 0,
+    frozenT: 0, paralyzeT: 0, burnT: 0, burnDps: 0, burnHpPct: 0, shockT: 0,
+    frostStacks: 0, frostT: 0, kbVX: 0, kbVY: 0, droneT: 0, orbT: 0, bossResist: 0.5,
+    rot: 0, rotV: 0.6, flash: 0,
+    elite: false, boss: true,
+    ab: { fan: 2.2, ring: 6, dash: 9.5, summon: 13, meteor: 8, laser: 14, enrage: 3 },
+    elite: false,
+    laserT: 0, laserA: 0, enraged: 0, drainOn: 0,
+    dashT: 0, dashX: 0, dashY: 0, phase: 1
+  };
+  e.maxHp = e.hp;
+  G.enemies.push(e);
+  G.boss = e; G.bossSpawned = true;
+  $('#bossWrap').classList.add('on');
+  toast('☠ 血月降临 · 血月之主 出现！', 2600);
+}
+
+/* ---- 掉落物（数量受【诅咒】加成，掉率受【幸运】加成） ---- */
+function dropXp(e) {
+  let n = (e.boss ? 26 : e.elite ? 12 : 1) * P.dropScale;
+  n = Math.floor(n) + (Math.random() < (n % 1) ? 1 : 0);
+  const val = Math.max(1, Math.round(e.xp * XP_DROP_MUL / Math.max(1, n)));   // 经验 +25%
+  for (let i = 0; i < n; i++) {
+    G.pickups.push({
+      x: e.x + rand(-14, 14), y: e.y + rand(-14, 14), type: 'xp', value: val,
+      vx: rand(-55, 55), vy: rand(-55, 55), pulled: false, t: rand(0, 6), r: e.elite || e.boss ? 8 : 6
+    });
+  }
+}
+function dropGold(e) {
+  const chance = Math.min(1, (e.gold || 0.1) * P.luckDrop);   // 幸运提高金币掉率
+  let n = e.boss ? 14 : e.elite ? 7 : (Math.random() < chance ? 1 : 0);
+  if (n > 0) n = Math.max(1, Math.round(n * P.dropScale));
+  for (let i = 0; i < n; i++) {
+    G.pickups.push({
+      x: e.x + rand(-18, 18), y: e.y + rand(-18, 18), type: 'gold',
+      value: Math.max(1, Math.round((e.elite ? randInt(3, 6) : e.boss ? randInt(12, 22) : 1) * P.dropScale)),
+      vx: rand(-70, 70), vy: rand(-70, 70), pulled: false, t: 0, r: 7
+    });
+  }
+}
+// 道具权重：磁铁概率提高
+const ITEM_WEIGHTS = [['magnet', 42], ['watch', 20], ['bomb', 18], ['heart', 20]];
+function rollItemKind() {
+  let total = 0;
+  for (const w of ITEM_WEIGHTS) total += w[1];
+  let r = Math.random() * total;
+  for (const w of ITEM_WEIGHTS) { r -= w[1]; if (r <= 0) return w[0]; }
+  return 'magnet';
+}
+function spawnItem(x, y, kind) {
+  const k = kind || rollItemKind();
+  G.pickups.push({ x, y, type: 'item', kind: k, value: 0, vx: 0, vy: 0, pulled: false, t: 0, r: 13 });
+}
+/* 需求 8：精英掉落技能卡 + Hex Tech 改造（占位符） */
+function dropEliteLoot(e) {
+  G.pickups.push({ x: e.x + rand(-26, 26), y: e.y + rand(-26, 26), type: 'card', value: 1, vx: 0, vy: 0, pulled: false, t: 0, r: 15 });
+  G.pickups.push({ x: e.x + rand(-26, 26), y: e.y + rand(-26, 26), type: 'hex', value: 1, vx: 0, vy: 0, pulled: false, t: 0, r: 15 });
+  spawnItem(e.x + rand(-30, 30), e.y + rand(-30, 30));
+}
+
+/* ==========================================================================
+   10. 战斗
+   ========================================================================== */
+function damageEnemy(e, dmg, fromX, fromY, noShare) {
+  const crit = Math.random() < P.crit;
+  const vuln = e.vulnT > 0 ? (1 + e.vulnMul) : 1;   // 易伤：受到伤害提高
+  const real = dmg * (crit ? P.critDmgTotal : 1) * vuln;
+  e.hp -= real;
+  statAdd(G.src, real);                              // 伤害统计
+  // 感电：互相分享 8% 受到的伤害（不再递归传导）
+  if (e.shockT > 0 && !noShare) {
+    const others = G.enemies.slice();
+    for (const o of others) {
+      if (o === e || o.shockT <= 0 || o.hp <= 0) continue;
+      o.hp -= real * 0.08;
+      if (o.hp <= 0) killEnemy(o);
+    }
+  }
+  e.flash = 0.12;
+  const a = Math.atan2(e.y - fromY, e.x - fromX);
+  e.x += Math.cos(a) * 2.2 / (e.elite || e.boss ? 4 : 1);
+  e.y += Math.sin(a) * 2.2 / (e.elite || e.boss ? 4 : 1);
+  burst(e.x, e.y, crit ? '#fff2a8' : e.color, crit ? 6 : 3, 140, 3, 0.30);
+  if (crit && G.texts.length < 40) floatText(e.x, e.y - e.r - 6, '暴击 ' + Math.round(real), '#ffe066');
+  // 嗜血：造成伤害的一定比例转化为生命（单次转血上限 = 2% 最大生命，防止 AOE 瞬间回满）
+  if (P.lifesteal > 0) {
+    const heal = Math.min(real * P.lifesteal, P.maxHp * 0.02);
+    P.hp = Math.min(P.maxHp, P.hp + heal);
+  }
+  if (e.hp <= 0) killEnemy(e);
+}
+function killEnemy(e) {
+  const i = G.enemies.indexOf(e);
+  if (i < 0) return;
+  G.enemies.splice(i, 1);
+  G.kills++;
+  statKill(G.src);                       // 按伤害来源记录击杀数
+  const hx = P.hx;
+  if (hx.firework && G.chain < MAX_CHAIN) {                                  // 烟花秀
+    const prevSrc = G.src;
+    G.src = 'hex';
+    G.chain++;
+    try { explode(e.x, e.y, 110, P.attack * 3.0, '#ffd166', null); } finally { G.chain--; G.src = prevSrc; }
+  }
+  // 掷骰狂人：0.25% 概率在地图上掉落一枚属性碎片（可被磁铁吸取）
+  if (hx.dice && Math.random() < 0.0025) {
+    G.pickups.push({ x: e.x, y: e.y, type:'shard', value: 1,
+      vx: rand(-50, 50), vy: rand(-50, 50), pulled: false, t: 0, r: 13 });
+  }
+  if (hx.speedDemon) {                                                        // 速度恶魔
+    P.speedStacks = Math.min(5, (P.speedStacks || 0) + 1);
+    P.speedStackT = 5;
+  }
+  // 重如泰山 / 轻如鸿毛：每 100 击杀累积一层
+  if (hx.heavy || hx.feather) {
+    const stack = Math.floor(G.kills / 100);
+    if (hx.heavy && stack > (hx.heavyDone || 0)) { applyHeavyStacks(stack - (hx.heavyDone || 0)); hx.heavyDone = stack; recalc(); }
+    if (hx.feather && stack > (hx.featherDone || 0)) { applyFeatherStacks(stack - (hx.featherDone || 0)); hx.featherDone = stack; recalc(); }
+  }
+  burst(e.x, e.y, e.color, e.boss ? 90 : e.elite ? 40 : 10, e.boss ? 420 : 210, e.boss ? 7 : 4, e.boss ? 1.4 : 0.6);
+  ring(e.x, e.y, e.color, e.boss ? 60 : e.elite ? 24 : 8, e.r * 0.8, 3);
+  dropXp(e); dropGold(e);
+  if (e.elite) dropEliteLoot(e);
+  if (e.boss) { G.boss = null; endRun(true); }
+}
+
+function nearestEnemy(x, y, maxR) {
+  let best = null, bd = maxR * maxR;
+  for (const e of G.enemies) {
+    const dx = e.x - x, dy = e.y - y, d2 = dx * dx + dy * dy;
+    if (d2 < bd) { bd = d2; best = e; }
+  }
+  return best;
+}
+
+/* ==========================================================================
+   10.5 主动技能：拔刀瞬闪
+   消费 50 能量、朝敌人最密集处闪现大半个屏幕、路径伤害 10×等级×攻击力、
+   命中者被减速（时长受「负面效果」加成）、自身无敌 2 秒、最多充能 3 次
+   ========================================================================== */
+function distToSegment(px, py, x0, y0, x1, y1) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 > 0 ? ((px - x0) * dx + (py - y0) * dy) / len2 : 0;
+  t = clamp(t, 0, 1);
+  return Math.hypot(px - (x0 + dx * t), py - (y0 + dy * t));
+}
+
+/* 找出敌人最密集的位置（数量 × 距离权重，越近越优先） */
+function densestCluster() {
+  if (!G.enemies.length) return null;
+  const R = 230;
+  const step = G.enemies.length > 90 ? 2 : 1;   // 数量多时抽样，控制开销
+  let best = null, bestScore = 0;
+  for (let i = 0; i < G.enemies.length; i += step) {
+    const e = G.enemies[i];
+    let c = 0;
+    for (let j = 0; j < G.enemies.length; j++) {
+      const o = G.enemies[j];
+      const dx = o.x - e.x, dy = o.y - e.y;
+      if (dx * dx + dy * dy < R * R) c++;
+    }
+    const d = Math.hypot(e.x - P.x, e.y - P.y);
+    const score = c / (1 + d / 700);
+    if (score > bestScore) { bestScore = score; best = e; }
+  }
+  return best;
+}
+
+/* 主动技能统一入口：blink / fly / coin */
+function castActive(id) {
+  id = id || 'blink';
+  if (!G.running || G.paused || G.over) return;
+  if (id === 'fly') return castFly();
+  if (id === 'coin') return toggleCoin();
+  if (!P.actives || P.actives.indexOf('blink') < 0) return;
+  castBlink();
+}
+/* 使用主动技能后的公共结算（安可 / 大法师 / 最终形态） */
+function afterActive(cost) {
+  const hx = P.hx;
+  if (hx.encore) { P.energy = Math.min(P.maxEnergy, P.energy + cost * 0.15); }
+  if (hx.archmage && P.archCd <= 0) {
+    // 大法师：使用任意主动技能后获得 50 能量，25 秒冷却
+    P.archCd = 25;
+    P.energy = Math.min(P.maxEnergy, P.energy + 50);
+    floatText(P.x, P.y - 52, '大法师：能量 +50', '#c08bff');
+  }
+  if (hx.final && P.finalT <= 0) {
+    P.finalT = 5;
+    P.atkTempPct += 0.5;
+    P.hpPct += 0.5;
+    recalc();
+    floatText(P.x, P.y - 62, '最终形态', '#ffd166');
+  }
+}
+/* 飞天姿态：3 秒无法被选中，落地震击并击退 */
+function castFly() {
+  if (P.flyT > 0) return;
+  if (P.energy < ACTIVES.fly.cost) { floatText(P.x, P.y - 34, '能量不足', '#a08fd0'); return; }
+  P.energy -= ACTIVES.fly.cost;
+  P.flyT = FLY_TIME;
+  P.invT = Math.max(P.invT, FLY_TIME);
+  burst(P.x, P.y, '#c9a8ff', 26, 260, 4, 0.7);
+  ring(P.x, P.y, '#e0d0ff', 22, 30, 3);
+  toast('🕊 飞天姿态：4 秒无法被选中', 1500);
+  afterActive(ACTIVES.fly.cost);
+}
+/* 落地：冲击波 + 震屏 + 尘埃粒子（落地动画） */
+function flyLand() {
+  G.landFx = 0.55;                       // 落地动画计时（见 render）
+  explode(P.x, P.y, 220, P.attack * 6.0, '#c9a8ff', null);
+  for (let i = 0; i < 3; i++) ring(P.x, P.y, i === 0 ? '#ffffff' : '#c9a8ff', 34 - i * 8, 26 + i * 46, 5 - i);
+  burst(P.x, P.y, '#e6d8ff', 40, 420, 5, 0.9);
+  for (let i = 0; i < 18; i++) {         // 向外扩散的尘埃
+    const a = rand(0, TAU);
+    G.particles.push({ x: P.x + Math.cos(a) * 20, y: P.y + Math.sin(a) * 20,
+      vx: Math.cos(a) * rand(120, 300), vy: Math.sin(a) * rand(120, 300) - 40,
+      life: rand(0.5, 0.9), max: 0.9, size: rand(3, 6), color: '#b9a6e8', drag: 0.9 });
+  }
+  for (const e of G.enemies) if (Math.hypot(e.x - P.x, e.y - P.y) < 260) knockback(e, 220);
+  G.shake = Math.max(G.shake, 18);
+  floatText(P.x, P.y - 50, '落地震击！', '#c9a8ff');
+}
+/* 金钱的力量：持续射出金币，命中路径造成伤害，金币可回收 */
+function toggleCoin() {
+  if (!P.hx.coinPower) return;
+  P.coinOn = !P.coinOn;
+  toast(P.coinOn ? '🪙 金钱的力量：开启' : '🪙 金钱的力量：关闭', 1200);
+}
+function updateCoin(dt) {
+  if (!P.coinOn || !P.hx.coinPower) return;
+  G.src = 'coin';
+  P.coinT = (P.coinT || 0) - dt;
+  if (P.coinT > 0) return;
+  P.coinT = 0.12;
+  if (META.gold < 1) { P.coinOn = false; return; }
+  META.gold -= 1; G.goldRun = Math.max(0, G.goldRun - 1); updateGoldText();
+  const t = pickTargets(1, false)[0];
+  const a = t ? Math.atan2(t.y - P.y, t.x - P.x) : Math.atan2(P.aimY, P.aimX);
+  spawnShot({
+    kind:'coin', x:P.x, y:P.y, ang:a, speed:900, dmg: P.attack * 5 * P.globalDmg,
+    pierce: 0, r:8, color:'#ffd166', st: P.skills.rifle || newSkillState('rifle'), life: 1.2, recover: 1
+  });
+}
+/* 拔刀瞬闪 */
+/* 拔刀瞬闪：极高速位移（0.15 秒冲过整段距离），沿途斩击敌人 */
+function updateDash(dt) {
+  const d = P.dash;
+  if (!d) return;
+  d.t += dt;
+  const k = Math.min(1, d.t / d.dur);
+  const px = d.x0 + (d.x1 - d.x0) * k;
+  const py = d.y0 + (d.y1 - d.y0) * k;
+  for (const e of G.enemies.slice()) {
+    if (e.hp <= 0 || d.hitSet.indexOf(e) >= 0) continue;
+    if (distToSegment(e.x, e.y, P.x, P.y, px, py) > e.r + ACTIVE.radius) continue;
+    d.hitSet.push(e);
+    damageEnemy(e, d.dmg, P.x, P.y);
+    if (e.hp > 0) {
+      applySlow(e, ACTIVE.slow, d.slowT);
+      applyVuln(e, ACTIVE.vuln, d.vulnT);
+    }
+  }
+  G.trail.push({ x: px, y: py, r: P.r * 0.9, life: 0.32, max: 0.32 });
+  if (Math.random() < 0.8) burst(px, py, '#b98bff', 2, 120, 3, 0.35);
+  P.x = px; P.y = py;
+  if (k >= 1) {
+    P.dash = null;
+    burst(P.x, P.y, '#e6d6ff', 20, 300, 4, 0.6);
+    ring(P.x, P.y, '#b98bff', 22, 44, 3.5);
+    G.shake = Math.max(G.shake, 10);
+  }
+}
+
+function castBlink() {
+  if (P.energy < ACTIVE.cost) { floatText(P.x, P.y - 34, '能量不足', '#a08fd0'); return; }
+  G.src = 'blink';
+  P.energy -= ACTIVE.cost;
+
+  // 1. 目标：敌人最密集处（无敌人时按朝向）
+  const tgt = densestCluster();
+  let dx, dy;
+  if (tgt) { dx = tgt.x - P.x; dy = tgt.y - P.y; }
+  else { dx = P.aimX; dy = P.aimY; }
+  let d = Math.hypot(dx, dy);
+  if (d < 1) { dx = P.aimX; dy = P.aimY; d = 1; }
+  // 突进距离为【固定值】：约大半个屏幕（不再随敌人远近变化）
+  const dist = Math.max(W, H) * ACTIVE.screenRatio;
+  const ux = dx / d, uy = dy / d;
+  const x0 = P.x, y0 = P.y;
+  const x1 = x0 + ux * dist, y1 = y0 + uy * dist;
+
+  // 2. 路径伤害 = 5 × 等级 × 攻击力，在位移过程中逐段结算（见 updateDash），此处不再瞬间结算
+  const dmg = ACTIVE.damageMul * P.level * P.attack;
+
+  // 3. 进入「高速位移」状态（不再是瞬移），路径伤害在位移过程中逐段结算
+  P.dash = { x0, y0, x1, y1, t: 0, dur: 0.15, dmg, hitSet: [], slowT: ACTIVE.slowTime, vulnT: ACTIVE.vulnTime };
+  P.invT = ACTIVE.invuln;
+  G.shake = Math.max(G.shake, 13);
+  G.flashT = Math.max(G.flashT, 0.10);
+
+  // 4. 起手残影
+  for (let i = 0; i <= 5; i++) {
+    const t = i / 5;
+    G.trail.push({ x: x0 + (x1 - x0) * t * 0.25, y: y0 + (y1 - y0) * t * 0.25, r: P.r * (0.6 + 0.4 * t), life: 0.4, max: 0.4 });
+  }
+  burst(x0, y0, '#b98bff', 12, 200, 3, 0.4);
+  floatText(P.x, P.y - 40, '拔刀瞬闪！', '#c9a8ff');
+  if (P.hx.shadowDash) { P.buffSpeed = 1.0; P.buffSpeedT = 2; recalc(); }   // 暗影疾奔
+  afterActive(ACTIVE.cost);
+  updateSkillBtn();
+}
+
+/* ==========================================================================
+   10.7 Hex Tech 运行时效果
+   ========================================================================== */
+function updateHexRuntime(dt) {
+  const hx = P.hx;
+  // 飞天姿态落地
+  if (P.flyT > 0) {
+    P.flyT -= dt;
+    if (P.flyT <= 0) flyLand();
+  }
+  updateCoin(dt);
+  if (P.shieldInv > 0) {
+    P.shieldInv -= dt;
+    if (P.shieldInv <= 0 && P.zeroPending) {          // 绝对零度
+      P.zeroPending = 0;
+      for (const e of G.enemies) if (onScreen(e)) applyFreeze(e, 1.5);
+      toast('❄ 绝对零度：屏幕内敌人冻结 1.5 秒', 1500);
+    }
+  }
+  if (P.invT > 0) { /* 由 updatePlayer 递减 */ }
+  if (P.buffSpeedT > 0) { P.buffSpeedT -= dt; if (P.buffSpeedT <= 0) { P.buffSpeed = 0; recalc(); } }
+  if (P.finalT > 0) {
+    P.finalT -= dt;
+    if (P.finalT <= 0) {
+      P.haste -= 50;
+      P.atkTempPct -= 0.5;      // 撤销最终形态的攻击加成（加算池）
+      P.hpPct -= 0.5;
+      recalc();
+    }
+  }
+  if (P.archCd > 0) P.archCd -= dt;
+  if (G.flameCd > 0) G.flameCd -= dt;
+  if (G.landFx > 0) G.landFx -= dt;
+  // 速度恶魔
+  if (hx.speedDemon && P.speedStackT > 0) {
+    P.speedStackT -= dt;
+    if (P.speedStackT <= 0) { P.speedStacks = 0; }
+    P.buffSpeed = P.speedStacks * 0.05 + (P.speedStacks >= 5 ? 0.10 : 0);
+    recalc();
+  }
+  // 时间静止：每 18 秒凝滞全场敌人 2 秒（自身免伤并可行动、移速 +200%）
+  if (hx.timestop) {
+    P.timeStopFx = (P.timeStopFx || 0) - dt;
+    if (P.timeStopFx <= 0) {
+      P.timeStopFx = 18;
+      P.timeStopT = 2;
+      G.freeze = Math.max(G.freeze, 2);        // 修复：必须设置 G.freeze 才真正凝滞敌人
+      P.invT = Math.max(P.invT, 2);
+      P.buffSpeed = 2.0; P.buffSpeedT = 2; recalc();
+      toast('⏱ 时间静止：敌人凝滞 2 秒', 1600);
+    }
+    if (P.timeStopT > 0) P.timeStopT -= dt;
+  }
+  // 超时空军团
+  if (hx.legion) {
+    P.legionT -= dt;
+    if (P.legionT <= 0) {
+      P.legionT = 6;
+      let n = 0;
+      for (let i = 0; i < 5; i++) {
+        const pool = G.enemies.filter(e => !e.elite && !e.boss);
+        if (!pool.length) break;
+        const t = pick(pool);
+        burst(t.x, t.y, '#c08bff', 10, 240, 4, 0.6);
+        killEnemy(t); n++;
+      }
+      if (n) floatText(P.x, P.y - 50, '超时空军团 ×' + n, '#c08bff');
+    }
+  }
+  // 金币雨
+  if (hx.goldRain) {
+    if (P.goldRainDur > 0) {
+      P.goldRainDur -= dt;
+      const tick = 0.25;
+      P.goldRainTick = (P.goldRainTick || 0) - dt;
+      if (P.goldRainTick <= 0) {
+        P.goldRainTick = tick;
+        G.src = 'goldrain';
+        for (const e of G.enemies.slice()) {
+          if (e.hp <= 0) continue;
+          if (Math.hypot(e.x - P.goldRainX, e.y - P.goldRainY) < 320 && !e.boss) {
+            damageEnemy(e, e.maxHp * 0.01 * P.explDmg, P.goldRainX, P.goldRainY);
+          }
+        }
+        for (let i = 0; i < 2; i++) {
+          const a = rand(0, TAU), d = rand(0, 300);
+          G.pickups.push({ x: P.goldRainX + Math.cos(a) * d, y: P.goldRainY + Math.sin(a) * d,
+            type:'gold', value: randInt(2, 6), vx: 0, vy: 0, pulled: false, t: 0, r: 7 });
+        }
+      }
+    } else {
+      P.goldRainT -= dt;
+      if (P.goldRainT <= 0) {
+        const other = !!hx.goldBullet || !!hx.interest;
+        P.goldRainT = other ? 16 : 26;
+        P.goldRainDur = 5;
+        P.goldRainX = P.x + rand(-260, 260);
+        P.goldRainY = P.y + rand(-260, 260);
+        toast('🪙 金币雨！', 1600);
+      }
+    }
+  }
+  // 利滚利
+  if (hx.interest) {
+    P.interestT -= dt;
+    if (P.interestT <= 0) {
+      P.interestT = 60;
+      const add = Math.max(1, Math.round(META.gold * 0.05));
+      META.gold += add; G.goldRun += add;
+      toast('¤ 利滚利：金币 +' + add, 1600);
+      updateGoldText();
+    }
+  }
+}
+function onScreen(e) {
+  const camX = P.x - W / 2, camY = P.y - H / 2;
+  return e.x > camX && e.x < camX + W && e.y > camY && e.y < camY + H;
+}
+
+/* 主动技能按钮（手机端）与充能显示 */
+const $btnSkill = $('#btnSkill');
+const $btnSkillNum = $btnSkill.querySelector('.num');
+const $btnFly = $('#btnFly'), $btnCoin = $('#btnCoin');
+/* 触屏判定：媒体查询 + 触摸能力，双保险（部分浏览器媒体查询不准） */
+const coarse = (typeof window !== 'undefined') && (
+  (!!window.matchMedia && window.matchMedia('(hover:none) and (pointer:coarse)').matches) ||
+  ('ontouchstart' in window) ||
+  (navigator.maxTouchPoints > 0) ||
+  window.innerWidth <= 900
+);
+function updateSkillBtn() {
+  const c = charges();
+  $btnSkillNum.textContent = c + ' / 3';
+  $btnSkill.classList.toggle('empty', c <= 0);
+  $btnSkill.classList.toggle('ready', c > 0);
+  // Hex 额外主动技能的触屏按钮
+  if (coarse) {
+    $btnFly.style.display = P.hx.fly ? 'flex' : 'none';
+    $btnCoin.style.display = P.hx.coinPower ? 'flex' : 'none';
+    $btnFly.classList.toggle('empty', P.energy < ACTIVES.fly.cost);
+    $btnCoin.classList.toggle('empty', !P.coinOn);
+  }
+}
+
+const BULLET_SPEED = 620;
+/* 预判提前量：敌人朝主角直线移动，据此估算弹丸飞行时间内的落点，避免打空 */
+function leadTarget(e) {
+  const sp = e.dashT > 0 ? e.speed * 3.2 : (e.speed || 0);
+  let vx = P.x - e.x, vy = P.y - e.y;
+  const l = Math.hypot(vx, vy) || 1;
+  vx = vx / l * sp; vy = vy / l * sp;
+  let tx = e.x, ty = e.y;
+  for (let k = 0; k < 3; k++) {
+    const t = Math.hypot(tx - P.x, ty - P.y) / BULLET_SPEED;
+    tx = e.x + vx * t; ty = e.y + vy * t;
+  }
+  return { x: tx, y: ty };
+}
+
+/* ==========================================================================
+   10.55 伤害统计：按来源累计，供暂停 / 结算界面展示
+   ========================================================================== */
+const SRC_NAME = {
+  rifle:'突击步枪', lightning:'威能闪电', ray:'高能射线', ion:'离子斩', drone:'切割无人机',
+  dryice:'干冰弹', dryice_trail:'冰之痕', thermo:'温压弹', thermo_burn:'热能燃烧',
+  frostarmor:'霜铸甲胄', burn:'灼烧', blink:'拔刀瞬闪', coin:'金钱的力量',
+  goldrain:'金币雨', hex:'Hex 爆炸', other:'其他'
+};
+function statAdd(src, amount) {
+  if (!(amount > 0)) return;
+  G.dmg[src] = (G.dmg[src] || 0) + amount;
+}
+function statKill(src) {
+  G.killStat[src] = (G.killStat[src] || 0) + 1;
+}
+function dmgTotal() {
+  let t = 0;
+  for (const k in G.dmg) t += G.dmg[k];
+  return t;
+}
+function killTotal() {
+  let t = 0;
+  for (const k in G.killStat) t += G.killStat[k];
+  return t;
+}
+/* 生成伤害 / 击杀统计条 HTML */
+function dmgStatHTML() {
+  const total = dmgTotal();
+  const kills = killTotal();
+  const keys = {};
+  for (const k in G.dmg) keys[k] = 1;
+  for (const k in G.killStat) keys[k] = 1;
+  const rows = Object.keys(keys).map(k => ({ k, v: G.dmg[k] || 0, n: G.killStat[k] || 0 }))
+    .sort((a, b) => (b.v - a.v) || (b.n - a.n));
+  if (!rows.length) return '<div class="pNone">本局还没有战斗记录</div>';
+  let html = '<div class="dmgHead">总伤害 <b>' + Math.round(total).toLocaleString() +
+    '</b> ｜ 总击杀 <b>' + kills.toLocaleString() + '</b></div>';
+  for (const r of rows) {
+    const pct = total > 0 ? (r.v / total * 100) : 0;
+    const kpct = kills > 0 ? (r.n / kills * 100) : 0;
+    const name = SRC_NAME[r.k] || r.k;
+    html += '<div class="dmgRow"><div class="dmgTop"><span>' + name + '</span><b>' +
+      Math.round(r.v).toLocaleString() + ' <span class="dmgPct">' + pct.toFixed(1) + '%</span></b></div>' +
+      '<div class="dmgBar"><i style="width:' + Math.min(100, pct).toFixed(1) + '%"></i></div>' +
+      '<div class="dmgSub">击杀 <b>' + r.n.toLocaleString() + '</b>（' + kpct.toFixed(1) + '%）</div></div>';
+  }
+  return html;
+}
+
+/* ==========================================================================
+   10.6 技能引擎：冷却 / 索敌 / 弹丸 / 光束 / 爆炸 / 元素 / 负面状态
+   ========================================================================== */
+const ELEMENTS = [
+  { id:'ice',    color:'#8fd3ff', apply:(e)=>{ applyFreeze(e, 0.3); } },
+  { id:'fire',   color:'#ff7b47', apply:(e)=>{ applyBurn(e, 3, P.attack * 1.0, null); } },
+  { id:'elec',   color:'#ffe066', apply:(e)=>{ applyShock(e, 3); } },
+  { id:'energy', color:'#c08bff', apply:(e)=>{ applyVuln(e, 0.15, 3); } }
+];
+
+function applyFreeze(e, base) { const t = debuffTime(e, base); if (t > (e.frozenT || 0)) e.frozenT = t; }
+function applyPara(e, base) { const t = debuffTime(e, base); if (t > (e.paralyzeT || 0)) e.paralyzeT = t; }
+function applyShock(e, base) { const t = debuffTime(e, base); if (t > (e.shockT || 0)) e.shockT = t; }
+function applyBurn(e, base, dps, st) {
+  const t = debuffTime(e, base);
+  if (t > (e.burnT || 0)) e.burnT = t;
+  e.burnSrc = G.src;
+  e.burnDps = Math.max(e.burnDps || 0, dps);
+  if (st && st.flags && st.flags.burnHp) e.burnHpPct = BURN_BODY_PCT;   // 热能焚身
+}
+function knockback(e, dist) {
+  // 精英 / Boss 具有击退抗性，实际位移按其抗性衰减
+  const resist = e.boss ? KNOCK_RESIST.boss : (e.elite ? KNOCK_RESIST.elite : 0);
+  const d = dist * (1 - resist);
+  if (d <= 0) return;
+  const dx = e.x - P.x, dy = e.y - P.y;
+  const l = Math.hypot(dx, dy) || 1;
+  e.kbVX = dx / l * d * 6;
+  e.kbVY = dy / l * d * 6;
+}
+
+/* ---- 技能数值 ---- */
+function skillHaste(st) { return P.hasteT + st.haste; }                       // 独立急速与总急速【加算】
+function skillCd(st) { return st.def.cd * 100 / (100 + skillHaste(st)); }
+function skillDmg(st, extra) {
+  const mul = st.def.mul + st.dmgAdd + (extra || 0);
+  return P.attack * mul * st.finalMul * P.globalDmg;
+}
+/* 索敌：精英/Boss 优先，其余按距离。
+   敌人不足时会重复取同一单位，实现「齐射自动补位」（如 4 发齐射打同一个敌人） */
+function pickTargets(n, random) {
+  if (!G.enemies.length) return [];
+  let list;
+  if (random) {
+    list = G.enemies.slice();
+    for (let i = list.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = list[i]; list[i] = list[j]; list[j] = t; }
+  } else {
+    list = G.enemies.map((e) => {
+      const d2 = (e.x - P.x) * (e.x - P.x) + (e.y - P.y) * (e.y - P.y);
+      return { e, k: (e.elite || e.boss) ? d2 - 1e12 : d2 };
+    }).sort((a, b) => a.k - b.k).map(o => o.e);
+  }
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(list[i % list.length]);
+  return out;
+}
+
+/* ---- 爆炸（受雷区 / 烟花秀 / 艺术就是爆炸 / 热能扩散加成） ---- */
+function explode(x, y, radius, dmg, color, applyFn) {
+  radius *= P.explRadius;
+  dmg *= P.explDmg;
+  ring(x, y, color || '#ffb347', 18, radius * 0.8, 3.5);
+  burst(x, y, color || '#ffb347', 14, 260, 4, 0.5);
+  G.shake = Math.max(G.shake, 4);
+  // 快照遍历：damageEnemy 会触发击杀/连锁爆炸，直接按索引遍历会因数组收缩而越界
+  const list = G.enemies.slice();
+  for (const e of list) {
+    if (e.hp <= 0) continue;
+    if (Math.hypot(e.x - x, e.y - y) > radius + e.r) continue;
+    damageEnemy(e, dmg, x, y);
+    if (e.hp > 0 && applyFn) applyFn(e);
+  }
+}
+
+/* ---- 命中处理：伤害 + 元素 + 爆炸 + 分裂 + 击退 ---- */
+function shotHit(e, shot) {
+  const prevHp = e.hp;
+  damageEnemy(e, shot.dmg, shot.x, shot.y);
+  const killed = e.hp <= 0;
+  if (killed) onKillBySkill(e, shot);
+  if (shot.elem && e.hp > 0) shot.elem.apply(e);
+  if (shot.knockChance && Math.random() < shot.knockChance && e.hp > 0) knockback(e, 90);
+  if (shot.freezeChance && Math.random() < shot.freezeChance && e.hp > 0) applyFreeze(e, 0.5);
+  if (shot.onHit && e.hp > 0) shot.onHit(e);        // 继承自其它技能的附加效果
+  if (shot.artBoom && !shot.artDone) {                 // 艺术就是爆炸
+    shot.artDone = true;
+    const prevSrc = G.src; G.src = 'hex';
+    explode(shot.x, shot.y, 90, shot.dmg * 0.5, shot.color, null);
+    G.src = prevSrc;
+  }
+  // 极寒大冰弹：干冰弹【每次】命中敌人都会分裂出 2 个次级干冰弹（贯穿 6 个，次级弹不再分裂）
+  if (shot.kind === 'dryice' && !shot.sub && shot.st && shot.st.flags.splitIce) {
+    const st = shot.st;
+    const inherit = st.flags.iceInherit;   // 冰流霰弹：继承干冰弹与温压弹的全部效果
+    for (let k = 0; k < 2; k++) {
+      const sub = spawnShot({
+        kind:'dryice', x:e.x, y:e.y, ang:Math.random() * TAU, speed:430,
+        dmg: shot.dmg * 0.5, pierce: inherit ? st.pierce : 6, r:8, color: shot.color,
+        life: 1.6 * SHOT_LIFE_MUL,
+        st, sub:true, trail: inherit ? st.flags.trail : 0, freezeChance: inherit ? 0.15 : 0,
+        boom: inherit && P.skills.thermo && P.skills.thermo.flags.boom ? 1 : 0,
+        onHit: shot.onHit
+      });
+      if (sub) sub.artBoom = P.hx.artBoom ? 1 : 0;
+    }
+  }
+  // 干冰弹：命中时爆炸（冰流霰弹继承温压弹效果）
+  if (shot.boom) explode(shot.x, shot.y, 70 * (P.skills.thermo ? P.skills.thermo.radiusMul : 1), shot.dmg * 0.5, '#ffb347', (t) => {
+    if (P.skills.thermo && P.skills.thermo.burnDps > 0) applyBurn(t, 5, thermoBurnDps(P.skills.thermo), P.skills.thermo);
+  });
+  // 温压弹直击也会点燃目标
+  if (shot.kind === 'thermo' && shot.st && shot.st.burnDps > 0 && e.hp > 0) {
+    applyBurn(e, 5, thermoBurnDps(shot.st), shot.st);
+  }
+  // 子弹分裂
+  if (shot.split && !shot.splitDone) {
+    shot.splitDone = true;
+    const base = Math.atan2(shot.vy, shot.vx);
+    for (let i = 0; i < shot.split; i++) {
+      const a = base + (i - (shot.split - 1) / 2) * 0.45;
+      const s2 = spawnShot({
+        kind:'bullet', x:shot.x, y:shot.y, ang:a, speed:BULLET_SPEED * 0.85,
+        dmg: shot.dmg * shot.splitKeep, pierce:0, r:6, color: shot.color, st: shot.st,
+        elem: shot.elem, sub:true, knockChance: shot.knockChance
+      });
+      if (s2) s2.artBoom = P.hx.artBoom ? 1 : 0;
+    }
+  }
+  return prevHp - e.hp;
+}
+
+/* 技能击杀回调：电磁追捕 / 粒子冲击 / 烟花秀
+   衍生伤害可能互相触发，用连锁深度上限避免无限递归爆栈 */
+const MAX_CHAIN = 4;
+function onKillBySkill(e, shot) {
+  const st = shot && shot.st;
+  if (G.chain >= MAX_CHAIN) return;
+  G.chain++;
+  try {
+    if (st && st.id === 'lightning' && st.flags.chase && G.enemies.indexOf(e) < 0) {
+      const t = pickTargets(1, true)[0];
+      if (t) lightningStrike(t, skillDmg(st) * 0.25, true);
+    }
+    // 粒子冲击：仅「高能射线主射线」击杀时产生次级射线，衍生技能不再触发
+    if (st && st.id === 'ray' && st.flags.onkill && shot && shot.kind === 'ray') {
+      const t = pickTargets(1, true)[0];
+      if (t) fireRayAt(t, skillDmg(st) * 0.5, st, true);
+    }
+    if (P.hx.firework) explode(e.x, e.y, 110, P.attack * 3.0, '#ffd166', null);
+  } finally { G.chain--; }
+}
+
+/* ---- 弹丸 ---- */
+function spawnShot(o) {
+  if (G.shots.length > 420) return null;
+  const sp = o.speed || 600;
+  const s = {
+    kind: o.kind, st: o.st, sub: !!o.sub,
+    x: o.x, y: o.y, vx: Math.cos(o.ang) * sp, vy: Math.sin(o.ang) * sp,
+    r: o.r || 7, dmg: o.dmg, life: o.life || 1.6, pierce: o.pierce || 0,
+    hitSet: [], color: o.color || '#ffd166',
+    bounce: o.st ? o.st.bounce : 0, retarget: P.hx.moon || 0,
+    elem: o.elem || null, split: o.st && o.sub ? 0 : (o.st ? o.st.split : 0),
+    splitKeep: o.st ? o.st.splitKeep : 0.5, splitDone: false,
+    trail: o.trail || 0, trailT: 0, boom: o.boom || 0,
+    knockChance: o.knockChance || 0, freezeChance: o.freezeChance || 0,
+    src: o.src || G.src, onHit: o.onHit || null,
+    artBoom: P.hx.artBoom ? 1 : 0, artDone: false
+  };
+  G.shots.push(s);
+  return s;
+}
+
+function updateShots(dt) {
+  const camX = P.x - W / 2, camY = P.y - H / 2;
+  const M = 30;
+  for (let i = G.shots.length - 1; i >= 0; i--) {
+    const s = G.shots[i];
+    s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+    // 屏幕边缘反射
+    if (s.bounce > 0) {
+      let hit = false;
+      if (s.x < camX + M && s.vx < 0) { s.vx = -s.vx; hit = true; }
+      else if (s.x > camX + W - M && s.vx > 0) { s.vx = -s.vx; hit = true; }
+      if (s.y < camY + M && s.vy < 0) { s.vy = -s.vy; hit = true; }
+      else if (s.y > camY + H - M && s.vy > 0) { s.vy = -s.vy; hit = true; }
+      if (hit) { s.bounce--; s.hitSet.length = 0; s.life = Math.max(s.life, 0.8); }
+    }
+    // 命中判定
+    const near = queryNear(s.x, s.y, s.r + 26).slice();
+    for (const e of near) {
+      if (e.hp <= 0) continue;
+      if (s.hitSet.indexOf(e) >= 0) continue;
+      if (Math.hypot(e.x - s.x, e.y - s.y) > e.r + s.r) continue;
+      s.hitSet.push(e);
+      G.src = s.src || 'other';                 // 伤害统计归属到发射该弹丸的技能
+      shotHit(e, s);
+      // 月光骑士：重新索敌
+      if (s.retarget > 0 && s.hitSet.length > s.pierce) {
+        const t = pickTargets(4, false).find(o => s.hitSet.indexOf(o) < 0);
+        if (t) {
+          const a = Math.atan2(t.y - s.y, t.x - s.x);
+          const sp = Math.hypot(s.vx, s.vy);
+          s.vx = Math.cos(a) * sp; s.vy = Math.sin(a) * sp;
+          s.retarget--; s.pierce += 1; s.life = Math.max(s.life, 0.8);
+          continue;
+        }
+      }
+      if (s.hitSet.length > s.pierce) { s.life = 0; break; }
+    }
+    // 干冰弹冰痕
+    if (s.trail) {
+      s.trailT -= dt;
+      if (s.trailT <= 0) { s.trailT = 0.045; G.iceTrails.push({ x: s.x, y: s.y, life: 2.2, max: 2.2, r: 20 + (s.st ? s.st.sizeMul * 6 : 0) }); }
+    }
+    if (s.life <= 0 || s.x < camX - 400 || s.x > camX + W + 400 || s.y < camY - 400 || s.y > camY + H + 400) {
+      burst(s.x, s.y, s.color, s.sub ? 2 : 4, 110, 2.6, 0.26);
+      // 金钱的力量：射出的金币可以回收
+      if (s.recover) {
+        G.pickups.push({ x:s.x, y:s.y, type:'gold', value:1, vx:0, vy:0, pulled:false, t:0, r:7 });
+      }
+      G.shots.splice(i, 1);
+    }
+  }
+}
+
+/* ---- 瞬时光束（射线 / 闪电 / 离子） ---- */
+function addBeam(x0, y0, x1, y1, color, w, life, jagged, kind) {
+  G.beams.push({ x0, y0, x1, y1, color, w, life, max: life, jagged: !!jagged, kind: kind || 'ray' });
+}
+/* 光束的淡入淡出包络：快速生成（前 14% 生命）+ 平滑消失 */
+function beamAlpha(p) {
+  const age = 1 - p;                          // 0 = 刚生成，1 = 即将消失
+  const rampIn = Math.min(1, age / 0.14);
+  const rampOut = Math.pow(p, 0.6);           // 缓出，避免硬切
+  return rampIn * rampOut;
+}
+/* 屏幕内随机敌人 */
+function pickOnScreen(n) {
+  const camX = P.x - W / 2, camY = P.y - H / 2;
+  const pool = G.enemies.filter(e => e.x > camX && e.x < camX + W && e.y > camY && e.y < camY + H);
+  const out = [];
+  for (let i = 0; i < n && pool.length; i++) out.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  return out;
+}
+/* 温压弹灼烧 DPS：每级 +N 倍攻击力/秒 */
+function thermoBurnDps(ts) { return P.attack * (ts.burnDps || 0); }
+
+/* 沿直线（可在屏幕边缘反射）造成伤害 */
+function rayDamage(x0, y0, ux, uy, bounces, maxLen, dmg, width, st, color, applyFn, kind) {
+  width *= (st.widthMul || 1);              // 极化：射线系技能宽度加成
+  let x = x0, y = y0, vx = ux, vy = uy, left = bounces, len = maxLen;
+  const camX = P.x - W / 2, camY = P.y - H / 2;
+  let guard = 0;
+  while (len > 4 && guard++ < 8) {
+    const tx = vx > 0 ? (camX + W - x) / vx : vx < 0 ? (camX - x) / vx : Infinity;
+    const ty = vy > 0 ? (camY + H - y) / vy : vy < 0 ? (camY - y) / vy : Infinity;
+    const t = Math.min(tx, ty, len);
+    const nx = x + vx * t, ny = y + vy * t;
+    addBeam(x, y, nx, ny, color, width, 0.16, false, kind || 'ray');
+    const seg = G.enemies.slice();          // 快照遍历，击杀会改变数组
+    for (const e of seg) {
+      if (e.hp <= 0) continue;
+      if (distToSegment(e.x, e.y, x, y, nx, ny) > e.r + width) continue;
+      damageEnemy(e, dmg * st.finalMul * P.globalDmg, x, y);
+      if (e.hp > 0 && applyFn) applyFn(e);
+      // 爆燃吹息：只作用于高能射线主射线（kind==='ray'），次级射线/离子斩不受影响
+      if (e.hp > 0 && st.flags.flame && (kind || 'ray') === 'ray') flameRayHit(e);
+      // 粒子冲击：同样只有主射线击杀敌人才会产生次级射线
+      if (e.hp <= 0) onKillBySkill(e, { st, kind: kind || 'ray' });
+    }
+    if (t >= len - 0.01 || left <= 0) break;
+    left--;
+    if (tx < ty) vx = -vx; else vy = -vy;
+    x = nx; y = ny; len -= t;
+  }
+}
+
+/* ---- 各技能实现 ---- */
+function updateRifle(st, dt) {
+  G.src = 'rifle';
+  st.cdT -= dt;
+  if (st.cdT > 0) return;
+  st.cdT = skillCd(st);
+  const tg = pickTargets(st.targets, false);
+  const baseAng = tg.length ? 0 : Math.atan2(P.aimY, P.aimX);
+  for (let v = 0; v < st.volley; v++) {
+    const off = (v - (st.volley - 1) / 2) * 0.06;
+    if (!tg.length) { fireBullet(baseAng + off, st); continue; }
+    for (const t of tg) {
+      const lt = leadTarget(t);
+      const a = Math.atan2(lt.y - P.y, lt.x - P.x) + off;
+      fireBullet(a, st);
+    }
+  }
+  burst(P.x + P.aimX * 16, P.y + P.aimY * 16, '#ffe9a8', 3, 90, 2.5, 0.22);
+}
+function fireBullet(ang, st) {
+  let elem = null;
+  if (st.flags.elem) {
+    const hit = ELEMENTS.filter(() => Math.random() < 0.20);   // 各元素独立判定
+    if (hit.length) elem = pick(hit);
+  }
+  spawnShot({
+    kind:'bullet', x:P.x + Math.cos(ang) * 18, y:P.y + Math.sin(ang) * 18, ang,
+    speed: BULLET_SPEED, dmg: skillDmg(st), pierce: st.pierce, r:7,
+    life: 1.6 * SHOT_LIFE_MUL,                       // 存在时间 ×3
+    color: elem ? elem.color : '#ffe9a8', st, elem
+  });
+}
+
+function updateLightning(st, dt) {
+  G.src = 'lightning';
+  st.cdT -= dt;
+  if (st.cdT > 0) return;
+  st.cdT = skillCd(st);
+  // 索敌：只在屏幕内的敌人中随机挑（不足时重复取同一单位）
+  const pool = G.enemies.filter(e => onScreen(e));
+  const tg = [];
+  if (pool.length) for (let i = 0; i < st.targets; i++) tg.push(pool[Math.floor(Math.random() * pool.length)]);
+  for (const t of tg) lightningStrike(t, skillDmg(st), false);
+}
+function lightningStrike(t, dmg, isSub) {
+  const st = P.skills.lightning;
+  if (!st || G.enemies.indexOf(t) < 0) return;
+  G.src = 'lightning';
+  addBeam(t.x, t.y - 700, t.x, t.y, '#9be7ff', 7, 0.2, true);
+  burst(t.x, t.y, '#9be7ff', 10, 200, 3.5, 0.4);
+  damageEnemy(t, dmg * st.finalMul * P.globalDmg, t.x, t.y - 100);
+  if (t.hp > 0) {
+    if (st.flags.para) applyPara(t, 0.2);
+    if (P.skills.dryice && P.skills.dryice.flags.storm && t.frozenT > 0) {   // 风暴潮
+      const ds = P.skills.dryice;
+      const ls = P.skills.lightning;
+      const t2 = pickTargets(1, true)[0];
+      if (t2) {
+        // 继承干冰弹的全部效果 + 威能闪电的控制效果
+        spawnShot({
+          kind:'dryice', x:t.x, y:t.y, ang:Math.atan2(t2.y - t.y, t2.x - t.x), speed:520,
+          dmg: skillDmg(ds), pierce: ds.pierce, r:9, color:'#bff0ff', st: ds, src:'dryice',
+          life: 1.6 * SHOT_LIFE_MUL,
+          trail: ds.flags.trail ? 1 : 0,
+          freezeChance: ds.flags.freeze ? 0.15 : 0,
+          boom: (ds.flags.iceInherit && P.skills.thermo && P.skills.thermo.flags.boom) ? 1 : 0,
+          onHit: (ls && ls.flags.para) ? ((e) => applyPara(e, 0.2)) : null
+        });
+      }
+    }
+  } else onKillBySkill(t, { st });
+  if (st.flags.aoe) explode(t.x, t.y, 110 * (P.skills.thermo ? 1 : 1), dmg * 0.5, '#9be7ff', null);
+  if (st.flags.particle) {
+    for (let k = 0; k < 8; k++) {
+      spawnShot({ kind:'particle', x:t.x, y:t.y, ang: k * TAU / 8, speed:420,
+        dmg: dmg * 0.5, pierce: Infinity, r:6, color:'#cdeaff', st, life:0.7, sub:true });
+    }
+  }
+}
+
+/* 爆燃吹息：火焰射线命中敌人时附加温压弹燃烧，并发射一枚继承全部强化的温压弹 */
+function flameRayHit(e) {
+  const ts = P.skills.thermo;
+  if (!ts) return;
+  if (ts.burnDps > 0) applyBurn(e, 5, thermoBurnDps(ts), ts);
+  G.flameCd = (G.flameCd || 0) - 0;          // 由主循环递减
+  if (G.flameCd > 0) return;                 // 限流：避免大范围射线瞬间刷出上百枚温压弹
+  G.flameCd = 0.08;
+  const t = pickTargets(1, false)[0];
+  spawnShot({
+    kind:'thermo', x:e.x, y:e.y, ang: t ? Math.atan2(t.y - e.y, t.x - e.x) : Math.random() * TAU,
+    speed:470, dmg: skillDmg(ts), pierce: ts.pierce, r:11, color:'#ffb347', st: ts,
+    life:2.0, boom: ts.flags.boom ? 1 : 0, src:'thermo'
+  });
+}
+
+function fireRayAt(t, dmg, st, isSub) {
+  G.src = 'ray';
+  const a = Math.atan2(t.y - P.y, t.x - P.x);
+  // 爆燃吹息只让主射线变火焰色，次级射线/离子斩保持原色
+  const color = (st.flags.flame && !isSub) ? '#ff7b2b' : (isSub ? '#c9a8ff' : '#8fd3ff');
+  rayDamage(P.x, P.y, Math.cos(a), Math.sin(a), st.bounce, 2600, dmg, isSub ? 5 : 8,
+    st, color, (e) => {
+      if (st.flags.para) applyPara(e, 0.2);
+    }, isSub ? 'subray' : 'ray');
+}
+function updateRay(st, dt) {
+  G.src = 'ray';
+  st.cdT -= dt;
+  if (st.cdT <= 0) {
+    st.cdT = skillCd(st);
+    const tg = pickTargets(st.targets, false);
+    for (const t of tg) fireRayAt(t, skillDmg(st), st, false);
+  }
+  // 闪击射线 / 离子斩使用【固定间隔】，各自独立计时，不受任何技能急速影响
+  if (st.flags.subRay) {                       // 闪击射线
+    // 防御：闪击射线的计时器永远不会被其它技能（如离子斩）改写而变快
+    if (st.subT > SUBRAY_INTERVAL) st.subT = SUBRAY_INTERVAL;
+    st.subT -= dt;
+    if (st.subT <= 0) {
+      st.subT = SUBRAY_INTERVAL;                 // 固定 0.25 秒
+      const t = pickTargets(1, false)[0];
+      if (t) fireRayAt(t, skillDmg(st) * 0.5, st, true);
+    }
+  }
+  if (st.flags.ion) {                          // 离子斩：独立计时器（0.075 秒），不影响闪击射线
+    if (st.ionT > ION_INTERVAL) st.ionT = ION_INTERVAL;
+    st.ionT -= dt;
+    if (st.ionT <= 0) {
+      st.ionT = ION_INTERVAL;                    // 固定 0.075 秒
+      const t = pickOnScreen(1)[0];
+      if (t) {
+        G.src = 'ion';
+        const a = Math.random() * TAU;
+        // 伤害与宽度均继承射线；并继承威能闪电的控制效果（麻痹）
+        rayDamage(t.x - Math.cos(a) * 1400, t.y - Math.sin(a) * 1400, Math.cos(a), Math.sin(a),
+          0, 2800, skillDmg(st), 8, st, '#8fd3ff', (e) => {
+            const ls = P.skills.lightning;
+            if (ls && ls.flags.para) applyPara(e, 0.2);
+          }, 'ion');
+      }
+    }
+  }
+}
+
+function updateDrone(st, dt) {
+  G.src = 'drone';
+  // 技能急速按比例转换为旋转速度；基础大小/转速已 +30%
+  const spin = (1.15 * DRONE_BASE_SPIN + skillHaste(st) * 0.012) * st.rotMul;
+  st.ang += spin * dt;
+  const R = 78 + st.sizeMul * 10;
+  const size = 12 * DRONE_BASE_SIZE * st.sizeMul;
+  for (let i = 0; i < st.count; i++) {
+    const a = st.ang + (i / st.count) * TAU;
+    const ox = P.x + Math.cos(a) * R, oy = P.y + Math.sin(a) * R;
+    const near = queryNear(ox, oy, size + 26);
+    for (const e of near) {
+      if (e.hp <= 0 || e.droneT > 0) continue;
+      if (Math.hypot(e.x - ox, e.y - oy) > e.r + size) continue;
+      e.droneT = 0.1;                          // 每 0.1 秒造成一次伤害
+      damageEnemy(e, skillDmg(st), ox, oy);
+      if (e.hp > 0) {
+        if (st.flags.knock && Math.random() < 0.05) knockback(e, 130);
+        if (P.hx.artBoom && Math.random() < 0.15) explode(ox, oy, 70, skillDmg(st) * 0.5, '#c8d2ff', null);
+      } else onKillBySkill(e, { st });
+    }
+  }
+  // 工蜂追击：外圈反向旋转的淡黄色工蜂，特性与切割无人机一致
+  if (st.flags.bees) {
+    st.beeAng -= spin * dt;                      // 反向、同角速度
+    const RB = R + 46;                           // 外圈
+    const bsize = size * 0.85;
+    for (let i = 0; i < st.count; i++) {
+      const a = st.beeAng + (i / st.count) * TAU;
+      const ox = P.x + Math.cos(a) * RB, oy = P.y + Math.sin(a) * RB;
+      const near = queryNear(ox, oy, bsize + 26);
+      for (const e of near) {
+        if (e.hp <= 0 || e.droneT > 0) continue;
+        if (Math.hypot(e.x - ox, e.y - oy) > e.r + bsize) continue;
+        e.droneT = 0.1;
+        damageEnemy(e, skillDmg(st), ox, oy);
+        if (e.hp > 0) {
+          if (st.flags.knock && Math.random() < 0.05) knockback(e, 130);
+          // 20% 概率沿工蜂当前运动方向发射一架飞行切割无人机（同线速度，持续 5 秒）
+          if (Math.random() < 0.20) {
+            const lin = spin * RB;               // 工蜂的线速度
+            const dir = Math.atan2(-Math.cos(a), Math.sin(a)) + (lin < 0 ? Math.PI : 0);
+            spawnShot({
+              kind:'beedrone', x: ox, y: oy, ang: dir, speed: Math.abs(lin),
+              dmg: skillDmg(st), pierce: Infinity, r: bsize, color:'#ffe9a8',
+              st, life: 5, src:'drone'
+            });
+          }
+        } else onKillBySkill(e, { st });
+      }
+    }
+  }
+}
+
+function updateDryIce(st, dt) {
+  G.src = 'dryice';
+  st.cdT -= dt;
+  if (st.cdT > 0) return;
+  st.cdT = skillCd(st);
+  const tg = pickTargets(st.targets, false);
+  for (let v = 0; v < st.volley; v++) {
+    const off = (v - (st.volley - 1) / 2) * 0.12;
+    if (!tg.length) { fireDryIce(Math.atan2(P.aimY, P.aimX) + off, st); continue; }
+    for (const t of tg) {
+      const lt = leadTarget(t);
+      fireDryIce(Math.atan2(lt.y - P.y, lt.x - P.x) + off, st);
+    }
+  }
+}
+function fireDryIce(ang, st) {
+  spawnShot({
+    kind:'dryice', x:P.x, y:P.y, ang, speed:520, dmg: skillDmg(st),
+    pierce: st.pierce, r:9, color:'#bff0ff', st,
+    life: 1.6 * SHOT_LIFE_MUL,                       // 存在时间 ×3
+    trail: st.flags.trail ? 1 : 0, freezeChance: st.flags.freeze ? 0.15 : 0
+  });
+}
+
+function updateThermo(st, dt) {
+  G.src = 'thermo';
+  st.cdT -= dt;
+  if (st.cdT > 0) return;
+  st.cdT = skillCd(st);
+  const tg = pickTargets(st.targets, false);
+  for (let v = 0; v < st.volley; v++) {
+    const off = (v - (st.volley - 1) / 2) * 0.10;
+    if (!tg.length) { fireThermo(Math.atan2(P.aimY, P.aimX) + off, st); continue; }
+    for (const t of tg) {
+      const lt = leadTarget(t);
+      fireThermo(Math.atan2(lt.y - P.y, lt.x - P.x) + off, st);
+    }
+  }
+}
+function fireThermo(ang, st) {
+  const s = spawnShot({
+    kind:'thermo', x:P.x, y:P.y, ang, speed:470, dmg: skillDmg(st),
+    pierce: st.pierce, r:11, color:'#ffb347', st, life:2.0,
+    boom: st.flags.boom ? 1 : 0
+  });
+  if (s && st.burnDps > 0) s.burn = 1;
+}
+
+function updateFrostArmor(st, dt) {
+  st.cdT -= dt;
+  if (st.cdT <= 0 && st.layer < st.maxLayers) { st.cdT = skillCd(st); st.layer++; }
+  else if (st.cdT <= 0) st.cdT = skillCd(st);
+}
+
+/* 冰痕的冻伤结算由主循环调用 */
+function updateIceTrails(dt) {
+  for (let i = G.iceTrails.length - 1; i >= 0; i--) {
+    const t = G.iceTrails[i];
+    t.life -= dt;
+    if (t.life <= 0) { G.iceTrails.splice(i, 1); continue; }
+    t.tick = (t.tick || 0) - dt;
+    if (t.tick > 0) continue;
+    t.tick = 0.1;
+    const ds = P.skills.dryice;
+    if (!ds) continue;
+    G.src = 'dryice_trail';
+    const list = G.enemies.slice();
+    for (const e of list) {
+      if (e.hp <= 0) continue;
+      if (Math.hypot(e.x - t.x, e.y - t.y) > t.r + e.r) continue;
+      e.frostStacks = Math.min(99, (e.frostStacks || 0) + 1);
+      e.frostT = 3;                                     // 刷新持续时间
+      const per = P.attack * 0.005;                     // 每层冻伤 0.005 倍攻击力
+      damageEnemy(e, e.frostStacks * per, t.x, t.y);    // 结算当前层数总伤害
+    }
+  }
+}
+
+/* 技能总调度 */
+function updateWeapons(dt) {
+  for (const id in P.skills) {
+    const st = P.skills[id];
+    switch (id) {
+      case 'rifle': updateRifle(st, dt); break;
+      case 'lightning': updateLightning(st, dt); break;
+      case 'ray': updateRay(st, dt); break;
+      case 'drone': updateDrone(st, dt); break;
+      case 'dryice': updateDryIce(st, dt); break;
+      case 'thermo': updateThermo(st, dt); break;
+      case 'frostarmor': updateFrostArmor(st, dt); break;
+    }
+  }
+  updateShots(dt);
+  updateIceTrails(dt);
+}
+
+/* ==========================================================================
+   11. 更新逻辑
+   ========================================================================== */
+function updatePlayer(dt) {
+  let mx = 0, my = 0;
+  if (keys['a'] || keys['arrowleft']) mx -= 1;
+  if (keys['d'] || keys['arrowright']) mx += 1;
+  if (keys['w'] || keys['arrowup']) my -= 1;
+  if (keys['s'] || keys['arrowdown']) my += 1;
+  if (J.on && J.mag > 0.12) { mx += J.nx * J.mag; my += J.ny * J.mag; }
+  const len = Math.hypot(mx, my);
+  if (len > 1) { mx /= len; my /= len; }
+  P.vx = mx; P.vy = my;
+  if (P.chillT > 0) P.chillT -= dt;               // 被冰霜技能命中后的冰缓
+  const moveSpd = P.speed * (P.chillT > 0 ? 0.55 : 1);
+  if (P.dash) {
+    updateDash(dt);            // 拔刀瞬闪期间由位移接管移动
+  } else {
+    P.x += mx * moveSpd * dt;
+    P.y += my * moveSpd * dt;
+  }
+
+  // 朝向最近的敌人
+  const nm = nearestEnemy(P.x, P.y, 2400);
+  if (nm) {
+    let ax = nm.x - P.x, ay = nm.y - P.y;
+    const l = Math.hypot(ax, ay) || 1;
+    P.aimX = ax / l; P.aimY = ay / l;
+  } else if (len > 0.05) {
+    P.aimX = mx; P.aimY = my;
+  }
+  P.hurtT = Math.max(0, P.hurtT - dt);
+  P.invT = Math.max(0, P.invT - dt);
+  if (P.regen > 0) P.hp = Math.min(P.maxHp, P.hp + P.regen * dt);
+  // 能量回复（主动技能充能）
+  if (P.energy < P.maxEnergy) P.energy = Math.min(P.maxEnergy, P.energy + P.energyRegen * dt);
+  updateWeapons(dt);
+  // 走路粒子
+  if (len > 0.2 && Math.random() < 0.35) {
+    G.particles.push({ x: P.x, y: P.y + 12, vx: rand(-16, 16), vy: rand(6, 26), life: 0.36, max: 0.36, size: 2.6, color: '#4a6fa8', drag: 0.9 });
+  }
+}
+
+/* 受伤公式：先按【防御力】乘算减伤，再减去【格挡值】固定减伤，最低 0
+   霜铸甲胄护盾会优先破碎，并提供一段无敌时间 */
+function hurtPlayer(dmg) {
+  if (P.invT > 0 || P.shieldInv > 0) return;      // 主动技能无敌 / 护盾破碎无敌
+  if (P.timeStopT > 0) return;                    // 时间静止期间不受伤害
+  if (P.hurtT > 0) return;
+  // 护盾：受到攻击时破碎，抵挡 0.5 秒（+冰霜延续）内所有伤害
+  const fa = P.skills.frostarmor;
+  if (fa && fa.layer > 0) {
+    G.src = 'frostarmor';
+    fa.layer--;
+    P.shieldInv = 0.5 + fa.invAdd;
+    G.shake = Math.max(G.shake, 10);
+    ring(P.x, P.y, '#a9e6ff', 30, P.r + 18, 4);
+    burst(P.x, P.y, '#bfe9ff', 20, 240, 4, 0.6);
+    if (fa.boomAdd > 0) {                          // 冰霜爆裂
+      explode(P.x, P.y, 150, P.attack * (8.0 + fa.boomAdd), '#a9e6ff', (e) => applyFreeze(e, 0.4));
+    }
+    if (fa.flags.zero) {                           // 绝对零度（无敌结束时触发，见 updateHexRuntime）
+      P.zeroPending = 1;
+    }
+    floatText(P.x, P.y - 34, '护盾破碎!', '#a9e6ff');
+    return;
+  }
+  P.hurtT = 0.42;
+  const real = Math.max(0, dmg * (P.defMulFinal !== undefined ? P.defMulFinal : P.defMul) - P.block);
+  P.hp -= real;
+  G.shake = Math.max(G.shake, 7);
+  burst(P.x, P.y, '#ff4d6d', 9, 190, 3.5, 0.45);
+  floatText(P.x, P.y - 26, real <= 0 ? '格挡!' : '-' + Math.round(real), real <= 0 ? '#9fd8ff' : '#ff8fa3');
+  if (P.finalT > 0) P.finalT = P.finalT;           // 最终形态期间保留屏障（见 updateHexRuntime）
+  if (P.hp <= 0) {
+    // 死里逃生
+    if (P.revives > 0) {
+      P.revives--;
+      P.hp = P.maxHp * 0.5;
+      P.invT = 2.5;
+      G.flashT = 0.5; G.shake = 20;
+      burst(P.x, P.y, '#ffd166', 70, 420, 6, 1.2);
+      toast('✦ 死里逃生！剩余 ' + P.revives + ' 次', 2200);
+      if (P.hx.doll) { P.sizePct -= 0.2; P.spdPct += 0.2; recalc(); }   // 套娃：体型 -20%，移速 +20%
+      return;
+    }
+    P.hp = 0; endRun(false);
+  }
+}
+
+function spawnLogic(dt) {
+  const m = G.elapsed / 60;
+  // Boss 出现后：不再生成任何敌人与精英（Boss 自身的召唤技能仍然生效）
+  const bossPhase = G.bossSpawned;
+  // 普通怪：随时间加快刷怪
+  G.spawnT -= dt;
+  if (G.spawnT <= 0 && !bossPhase) {
+    G.spawnT = Math.max(0.17, 1.15 - m * 0.045);
+    let n = (1 + Math.floor(m / 3)) * SPAWN_MUL;   // 刷怪数量 +20%
+    if (Math.random() < 0.22) n++;
+    n *= P.enemyScale;                       // 诅咒：怪物数量 +5%/点
+    n = Math.floor(n) + (Math.random() < (n % 1) ? 1 : 0);
+    for (let i = 0; i < n; i++) spawnEnemy(pickType());
+  }
+  // 每 3 分钟精英（Boss 阶段不再刷新）
+  if (!bossPhase && G.elapsed >= G.nextElite) { G.nextElite += ELITE_INTERVAL; spawnElite(); }
+  // 需求 6：第 20 分钟清屏 + Boss
+  if (!G.bossSpawned && G.elapsed >= BOSS_TIME) spawnBoss();
+  // 场上道具随机刷新
+  G.itemT -= dt;
+  if (G.itemT <= 0) {
+    G.itemT = rand(30, 50) / P.luckDrop;      // 幸运：道具刷新更快
+    const a = rand(0, TAU), d = rand(320, 780);
+    spawnItem(P.x + Math.cos(a) * d, P.y + Math.sin(a) * d);
+  }
+  // 属性碎片不再自然刷新：只有「掷骰狂人」Hex 会由击杀掉落
+}
+
+function updateEnemies(dt) {
+  const frozen = G.freeze > 0;
+
+  // --- 移动 + 分离 ---（快照遍历：灼烧等伤害会击杀并改变数组）
+  const actives = G.enemies.slice();
+  for (const e of actives) {
+    if (e.hp <= 0) continue;
+    e.hitT = Math.max(0, e.hitT - dt);
+    e.flash = Math.max(0, e.flash - dt);
+    if (e.orbT > 0) e.orbT -= dt;
+    e.rot += e.rotV * dt;
+    if (e.contactT > 0) e.contactT -= dt;
+    if (e.droneT > 0) e.droneT -= dt;
+    if (e.orbT > 0) e.orbT -= dt;
+    if (e.slowT > 0) e.slowT -= dt;           // 减速（时长受「负面效果」加成）
+    if (e.vulnT > 0) e.vulnT -= dt;           // 易伤
+    if (e.frozenT > 0) e.frozenT -= dt;       // 冻结
+    if (e.paralyzeT > 0) e.paralyzeT -= dt;   // 麻痹
+    if (e.shockT > 0) e.shockT -= dt;         // 感电
+    if (e.frostT > 0) { e.frostT -= dt; if (e.frostT <= 0) e.frostStacks = 0; }
+    if (e.drainOn > 0) e.drainOn -= dt;       // 激光计时由 updateBoss 处理，避免重复递减
+    // 击退位移
+    if (e.kbVX || e.kbVY) {
+      e.x += e.kbVX * dt; e.y += e.kbVY * dt;
+      e.kbVX *= 0.86; e.kbVY *= 0.86;
+      if (Math.abs(e.kbVX) < 3) e.kbVX = 0;
+      if (Math.abs(e.kbVY) < 3) e.kbVY = 0;
+    }
+    // 灼烧（火子弹 / 热能燃烧）
+    if (e.burnT > 0) {
+      e.burnT -= dt;
+      let dps = e.burnDps || 0;
+      if (e.burnHpPct) dps += e.hp * BURN_BODY_PCT;    // 热能焚身：按当前生命值百分比结算
+      const burnDmg = dps * dt;
+      e.hp -= burnDmg;
+      statAdd(e.burnSrc || 'burn', burnDmg);
+      if (Math.random() < 0.25) burst(e.x, e.y, '#ff7b47', 1, 60, 2.4, 0.3);
+      if (e.hp <= 0) { killEnemy(e); continue; }
+    }
+
+    const stopped = e.frozenT > 0 || e.paralyzeT > 0;   // 冻结/麻痹不移动不攻击
+    if (!frozen && !stopped) {
+      if (e.boss) updateBoss(e, dt);
+      else {
+        let ax = P.x - e.x, ay = P.y - e.y;
+        const d = Math.hypot(ax, ay) || 1;
+        ax /= d; ay /= d;
+        // 精英技能调度
+        if (e.elite) updateElite(e, dt);
+        let sp = e.speed * (e.slowT > 0 ? (1 - e.slowMul) : 1);
+        if (e.dashT > 0) { e.dashT -= dt; sp *= (e.dashSpeed || 3.2); ax = e.dashX; ay = e.dashY; }
+        e.x += ax * sp * dt; e.y += ay * sp * dt;
+        // 吐刺的远程攻击
+        if (e.ranged && e.slowT <= 0) {
+          e.shotT -= dt;
+          if (e.shotT <= 0) {
+            e.shotT = rand(2.2, 3.2);
+            const bd = Math.hypot(P.x - e.x, P.y - e.y) || 1;
+            const bs = 230 * ENEMY_BULLET_SPEED_MUL;   // 远程子弹射速 -10%
+            G.ebullets.push({ x: e.x, y: e.y, vx: (P.x - e.x) / bd * bs, vy: (P.y - e.y) / bd * bs, r: 12, dmg: (e.bdmg || 8), life: 3.4, color: '#4be1a0', glow: 1 });
+          }
+        }
+      }
+    }
+    // 接触伤害
+    const pd = Math.hypot(e.x - P.x, e.y - P.y);
+    if (pd < e.r + P.r && e.contactT <= 0 && !frozen && !stopped) {
+      e.contactT = 0.72;
+      hurtPlayer(e.dmg);
+      // 血肉吞噬者的「吸血突进」：命中玩家时回复自身生命
+      if (e.drainOn > 0) {
+        const heal = e.dmg * 0.6;
+        e.hp = Math.min(e.maxHp, e.hp + heal);
+        floatText(e.x, e.y - e.r - 12, '吸血 +' + Math.round(heal), '#c86bff');
+      }
+    }
+  }
+
+  // --- 分离（避免完全重叠）---
+  if (!frozen) {
+    buildGrid();
+    for (const e of G.enemies) {
+      if (e.boss) continue;
+      const near = queryNear(e.x, e.y, 48);
+      for (let i = 0; i < near.length; i++) {
+        const o = near[i];
+        if (o === e || o.boss) continue;
+        const dx = o.x - e.x, dy = o.y - e.y;
+        const d2 = dx * dx + dy * dy;
+        const min = (e.r + o.r) * 0.82;
+        if (d2 > 0.01 && d2 < min * min) {
+          const d = Math.sqrt(d2);
+          const push = (min - d) / d * 0.28;
+          e.x -= dx * push; e.y -= dy * push;
+        }
+      }
+    }
+  }
+
+}
+
+/* ==========================================================================
+   10.4 精英 / Boss 技能库
+   ========================================================================== */
+/* 朝四周发射弹幕 */
+function abRing(e, n, speed, dmgMul, color) {
+  const sp = speed * ENEMY_BULLET_SPEED_MUL;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TAU + e.rot;
+    G.ebullets.push({ x:e.x, y:e.y, vx:Math.cos(a) * sp, vy:Math.sin(a) * sp,
+      r:12, dmg: e.dmg * (dmgMul || 0.5), life:5, color: color || '#ff6b8f', glow:1, src:'enemy' });
+  }
+  ring(e.x, e.y, color || '#ff6b8f', 18, 50, 4);
+}
+/* 朝主角突进 */
+function abBlink(e, mult) {
+  const a = Math.atan2(P.y - e.y, P.x - e.x);
+  e.dashT = 0.55;
+  e.dashX = Math.cos(a); e.dashY = Math.sin(a);
+  e.dashSpeed = mult || 4.0;
+  burst(e.x, e.y, e.color, 16, 240, 4, 0.5);
+}
+/* 范围爆炸 */
+function abNova(e, radius, dmgMul, color) {
+  const r = radius || 190;
+  ring(e.x, e.y, color || e.color, 30, r * 0.8, 4);
+  burst(e.x, e.y, color || e.color, 22, 300, 4, 0.6);
+  if (Math.hypot(P.x - e.x, P.y - e.y) < r + P.r) hurtPlayer(e.dmg * (dmgMul || 1.2));
+  G.shake = Math.max(G.shake, 6);
+}
+/* 周期性光环伤害 */
+function abAura(e, dt, radius, dpsMul) {
+  const near = Math.hypot(P.x - e.x, P.y - e.y) < (radius || 150);
+  if (near) {
+    P.auraAcc = (P.auraAcc || 0) + dt;
+    if (P.auraAcc >= 0.5) { P.auraAcc = 0; hurtPlayer(e.dmg * (dpsMul || 0.3)); }
+  }
+  if (Math.random() < 0.4) {
+    const a = rand(0, TAU), r = (radius || 150) * Math.sqrt(Math.random());
+    G.particles.push({ x:e.x + Math.cos(a) * r, y:e.y + Math.sin(a) * r,
+      vx:0, vy:-30, life:0.5, max:0.5, size:3.5, color:'#ff7b47', drag:0.95 });
+  }
+}
+/* 地刺：预警后爆发 */
+function abSpikes(e, n) {
+  for (let i = 0; i < (n || 4); i++) {
+    const a = rand(0, TAU), d = rand(70, 240);
+    G.zones.push({ x: e.x + Math.cos(a) * d, y: e.y + Math.sin(a) * d, r: 46,
+      t: 1.0, dmg: e.dmg * 0.9, color: '#8fd3ff', kind: 'spike' });
+  }
+}
+/* 冰霜新星：减速玩家 */
+function abFrostNova(e) {
+  const r = 220;
+  ring(e.x, e.y, '#8fd3ff', 30, r * 0.75, 4);
+  burst(e.x, e.y, '#bff0ff', 20, 260, 4, 0.6);
+  if (Math.hypot(P.x - e.x, P.y - e.y) < r) {
+    hurtPlayer(e.dmg * 0.8);
+    P.chillT = 2.5;
+    floatText(P.x, P.y - 40, '冰缓!', '#8fd3ff');
+  }
+}
+/* 连锁闪电：一条指向主角的粗光束 */
+function abChain(e) {
+  addBeam(e.x, e.y, P.x, P.y, '#ffe066', 8, 0.18, true, 'lightning');
+  if (Math.hypot(P.x - e.x, P.y - e.y) < 520) hurtPlayer(e.dmg * 0.7);
+}
+/* 电场：地面持续伤害区 */
+function abField(e) {
+  G.zones.push({ x: P.x, y: P.y, r: 130, t: 3.0, dmg: e.dmg * 0.25, color: '#ffe066', kind: 'field', tick: 0.5 });
+}
+/* 召唤眷属 */
+function abSummon(e, n) {
+  for (let i = 0; i < (n || 3); i++) {
+    const a = rand(0, TAU);
+    const en = spawnEnemy('grunt', 100, a);
+    if (en) { en.x = e.x + Math.cos(a) * 90; en.y = e.y + Math.sin(a) * 90; burst(en.x, en.y, e.color, 8, 180, 3, 0.5); }
+  }
+}
+/* 吸血突进 */
+function abDrain(e) {
+  abBlink(e, 5.0);
+  e.drainOn = 1.5;
+}
+
+/* 精英技能调度 */
+function updateElite(e, dt) {
+  if (!e.ab || (!e.elite && !e.boss)) return;
+  for (const id in e.ab) {
+    e.ab[id] -= dt;
+    if (e.ab[id] > 0) continue;
+    switch (id) {
+      case 'ring':     abRing(e, 12, 200, 0.5, '#ff6b8f'); e.ab[id] = 6.5; break;
+      case 'blink':    abBlink(e, 4.0); e.ab[id] = 8.0; break;
+      case 'nova':     abNova(e, 190, 1.2, '#ff7b47'); e.ab[id] = 7.0; break;
+      case 'aura':     e.ab[id] = 0.5; abAura(e, dt, 150, 0.30); break;
+      case 'spikes':   abSpikes(e, 4); e.ab[id] = 6.0; break;
+      case 'frostnova': abFrostNova(e); e.ab[id] = 9.0; break;
+      case 'chain':    abChain(e); e.ab[id] = 5.5; break;
+      case 'field':    abField(e); e.ab[id] = 8.0; break;
+      case 'summon':   abSummon(e, 3); e.ab[id] = 10.0; break;
+      case 'drain':    abDrain(e); e.ab[id] = 7.0; break;
+      default: break;
+    }
+  }
+}
+/* 流星轰炸：在主角附近标记落点，延迟后爆炸 */
+function abMeteor(e) {
+  for (let i = 0; i < 5; i++) {
+    const a = rand(0, TAU), d = rand(40, 300);
+    G.zones.push({ x: P.x + Math.cos(a) * d, y: P.y + Math.sin(a) * d, r: 80,
+      t: 1.2, dmg: e.dmg * 1.1, color: '#ff2f6d', kind: 'meteor' });
+  }
+  toast('☄ 流星轰炸！', 1200);
+}
+/* 地面预警区结算 */
+function updateZones(dt) {
+  for (let i = G.zones.length - 1; i >= 0; i--) {
+    const z = G.zones[i];
+    z.t -= dt;
+    if (z.kind === 'field') {
+      z.tick = (z.tick || 0) - dt;
+      if (z.tick <= 0) {
+        z.tick = 0.5;
+        if (Math.hypot(P.x - z.x, P.y - z.y) < z.r) hurtPlayer(z.dmg);
+      }
+    }
+    if (z.t <= 0) {
+      if (z.kind === 'spike') {
+        ring(z.x, z.y, '#8fd3ff', 16, z.r * 0.7, 4);
+        burst(z.x, z.y, '#bff0ff', 14, 260, 4, 0.5);
+        if (Math.hypot(P.x - z.x, P.y - z.y) < z.r) { hurtPlayer(z.dmg); P.chillT = 1.2; }
+      } else if (z.kind === 'meteor') {
+        ring(z.x, z.y, '#ff2f6d', 20, z.r * 0.8, 5);
+        burst(z.x, z.y, '#ff6b8f', 20, 320, 5, 0.7);
+        G.shake = Math.max(G.shake, 8);
+        if (Math.hypot(P.x - z.x, P.y - z.y) < z.r) hurtPlayer(z.dmg);
+      }
+      G.zones.splice(i, 1);
+    }
+  }
+}
+
+function updateBoss(e, dt) {
+  const ab = e.ab;
+  const toP = Math.atan2(P.y - e.y, P.x - e.x);
+
+  /* ---------- Boss 新增的三个技能 ---------- */
+  // 1) 流星轰炸：在主角周围标记 5 个落点，1.2 秒后爆炸
+  ab.meteor -= dt;
+  if (ab.meteor <= 0) { ab.meteor = e.enraged ? 6.5 : 9.0; abMeteor(e); }
+  // 2) 血月激光：从自身射出并旋转扫射 3 秒
+  ab.laser -= dt;
+  if (ab.laser <= 0) {
+    ab.laser = e.enraged ? 10 : 14;
+    e.laserT = 3.0;
+    e.laserA = Math.atan2(P.y - e.y, P.x - e.x);
+    toast('☠ 血月之主释放旋转激光！', 1300);
+  }
+  // 3) 狂暴：血量低于 50% 时永久强化
+  ab.enrage -= dt;
+  if (ab.enrage <= 0) {
+    if (!e.enraged && e.hp / e.maxHp < 0.5) {
+      e.enraged = 1; e.speed *= 1.4; e.dmg *= 1.2; e.r *= 1.08;
+      G.shake = Math.max(G.shake, 22);
+      burst(e.x, e.y, '#ff2f6d', 70, 420, 6, 1.2);
+      toast('☠ 血月之主进入狂暴状态！', 2400);
+      ab.enrage = 9999;
+    } else ab.enrage = 2.0;
+  }
+  const spd = e.speed * (e.slowT > 0 ? (1 - e.slowMul) : 1);   // Boss 同样吃减速
+  if (e.laserT > 0) {                                          // 血月激光：绕自身旋转扫射
+    e.laserT -= dt;
+    e.laserA += dt * 0.9;
+    const lx = e.x + Math.cos(e.laserA) * 1500, ly = e.y + Math.sin(e.laserA) * 1500;
+    addBeam(e.x, e.y, lx, ly, '#ff2f6d', 10, 0.1);
+    if (distToSegment(P.x, P.y, e.x, e.y, lx, ly) < P.r + 14) hurtPlayer(e.dmg * 0.45);
+    if (Math.random() < 0.5) burst(lx, ly, '#ff6b8f', 2, 120, 3, 0.3);
+  }
+  // 常规追击
+  if (e.dashT > 0) {
+    e.dashT -= dt;
+    e.x += e.dashX * spd * (e.dashSpeed || 3.4) * dt;
+    e.y += e.dashY * spd * (e.dashSpeed || 3.4) * dt;
+    if (Math.random() < 0.6) burst(e.x, e.y, '#ff2f6d', 2, 90, 3, 0.35);
+  } else {
+    e.x += Math.cos(toP) * spd * dt;
+    e.y += Math.sin(toP) * spd * dt;
+  }
+  // 特殊技能 1：扇形远程弹幕
+  ab.fan -= dt;
+  if (ab.fan <= 0) {
+    ab.fan = 2.4;
+    for (let i = -3; i <= 3; i++) {
+      const a = toP + i * 0.16;
+      G.ebullets.push({ x: e.x, y: e.y, vx: Math.cos(a) * 265 * ENEMY_BULLET_SPEED_MUL, vy: Math.sin(a) * 265 * ENEMY_BULLET_SPEED_MUL, r: 14, dmg: 11 * bigAtkScale(G.elapsed) * P.enemyScale, life: 4.5, color: '#ff6b8f', glow: 1 });
+    }
+    burst(e.x, e.y, '#ff6b8f', 8, 160, 3, 0.35);
+  }
+  // 特殊技能 2：环形弹幕
+  ab.ring -= dt;
+  if (ab.ring <= 0) {
+    ab.ring = 6.5;
+    const n = 22;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * TAU + e.rot;
+      G.ebullets.push({ x: e.x, y: e.y, vx: Math.cos(a) * 195 * ENEMY_BULLET_SPEED_MUL, vy: Math.sin(a) * 195 * ENEMY_BULLET_SPEED_MUL, r: 13, dmg: 9 * bigAtkScale(G.elapsed) * P.enemyScale, life: 5, color: '#ffd166', glow: 1 });
+    }
+    ring(e.x, e.y, '#ff2f6d', 30, 80, 4);
+  }
+  // 特殊技能 3：冲锋突进
+  ab.dash -= dt;
+  if (ab.dash <= 0 && e.dashT <= 0) {
+    ab.dash = 9.5;
+    e.dashT = 1.1;
+    e.dashX = Math.cos(toP); e.dashY = Math.sin(toP);
+    toast('☠ 血月之主发动冲锋！', 1100);
+  }
+  // 特殊技能 4：召唤小怪
+  ab.summon -= dt;
+  if (ab.summon <= 0) {
+    ab.summon = 13;
+    for (let i = 0; i < 6; i++) {
+      const a = rand(0, TAU);
+      const en = spawnEnemy('grunt', 120, a);
+      if (en) { en.x = e.x + Math.cos(a) * 110; en.y = e.y + Math.sin(a) * 110; burst(en.x, en.y, '#ff5d6c', 8, 170, 3, 0.5); }
+    }
+    toast('☠ 血月之主召唤了眷属！', 1100);
+  }
+}
+
+/* 敌人子弹 + 光束寿命 */
+function updateBullets(dt) {
+  const frozen = G.freeze > 0;
+  if (!frozen) {
+    for (let i = G.ebullets.length - 1; i >= 0; i--) {
+      const b = G.ebullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      if (Math.hypot(b.x - P.x, b.y - P.y) < P.r + b.r) { hurtPlayer(b.dmg); G.ebullets.splice(i, 1); continue; }
+      if (b.life <= 0) G.ebullets.splice(i, 1);
+    }
+  }
+  for (let i = G.beams.length - 1; i >= 0; i--) {
+    G.beams[i].life -= dt;
+    if (G.beams[i].life <= 0) G.beams.splice(i, 1);
+  }
+}
+
+/* ---- 需求 3：经验球 / 金币 / 道具的靠近吸附 ---- */
+function updatePickups(dt) {
+  for (let i = G.pickups.length - 1; i >= 0; i--) {
+    const p = G.pickups[i];
+    p.t += dt;
+    const dx = P.x - p.x, dy = P.y - p.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const R = P.pickup * (p.pulled ? 6 : 1);
+    if (d < R || p.pulled) {
+      // 吸附：越近越快
+      const k = clamp(1 - d / Math.max(R, 1), 0, 1);
+      const sp = 240 + k * 620 + (p.type === 'xp' ? 40 : 0);
+      p.x += (dx / d) * sp * dt;
+      p.y += (dy / d) * sp * dt;
+      p.vx = 0; p.vy = 0;
+    } else {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.92; p.vy *= 0.92;
+    }
+    if (d < P.r + 16) { collect(p); G.pickups.splice(i, 1); }
+  }
+}
+
+function collect(p) {
+  if (p.type === 'xp') {
+    gainXp(p.value);
+    burst(p.x, p.y, '#4ea8ff', 3, 70, 2.2, 0.25);
+  } else if (p.type === 'gold') {
+    const v = Math.max(1, Math.round(p.value * P.goldGain));
+    G.goldRun += v; META.gold += v;
+    burst(p.x, p.y, '#ffcf4d', 4, 100, 2.4, 0.3);
+    // 致命金币：拾取金币时发射三颗突击步枪子弹
+    if (P.hx.goldBullet && P.skills.rifle && G.enemies.length) {
+      const st = P.skills.rifle;
+      for (let k = 0; k < 3; k++) {
+        const t = pickTargets(1, true)[0];
+        if (!t) break;
+        const a = Math.atan2(t.y - P.y, t.x - P.x) + rand(-0.12, 0.12);
+        spawnShot({ kind:'bullet', x:P.x, y:P.y, ang:a, speed:BULLET_SPEED,
+          dmg: skillDmg(st), pierce: st.pierce, r:6, color:'#ffd166', st, sub:true });
+      }
+    }
+    updateGoldText();
+  } else if (p.type === 'shard') {
+    grantShards(1);
+    burst(p.x, p.y, '#c08bff', 10, 180, 3.5, 0.5);
+  } else if (p.type === 'item') {
+    useItem(p.kind);
+  } else if (p.type === 'card') {
+    toast('✦ 获得技能卡：请选择一项强化', 1800);
+    G.pendingLevels++;
+    if (!G.levelUpOpen) openLevelUp();
+  } else if (p.type === 'hex') {
+    const tier = rollHexTier();
+    floatText(P.x, P.y - 40, 'HEX: ' + HEX_TIERS[tier].name, HEX_TIERS[tier].color);
+    burst(P.x, P.y, HEX_TIERS[tier].color, 26, 240, 4, 0.8);
+    if (G.hexPick || G.paused) G.hexQueue.push(tier);      // 已有弹窗 -> 排队
+    else openHexPick(tier);
+  }
+}
+
+/* ---- 需求 11：道具效果 ---- */
+function useItem(kind) {
+  if (kind === 'magnet') {
+    let n = 0;
+    for (const p of G.pickups) {
+      // 经验 / 金币 / 属性碎片 都会被磁铁吸取
+      if (p.type === 'xp' || p.type === 'gold' || p.type === 'shard') { p.pulled = true; n++; }
+    }
+    toast('🧲 磁铁：吸取场上全部经验、金币与属性碎片（' + n + ' 个）', 1800);
+    ring(P.x, P.y, '#7fd7ff', 34, 90, 4);
+  } else if (kind === 'watch') {
+    G.freeze = 10;
+    toast('⏱ 怀表：凝滞场上所有敌人 10 秒', 1800);
+    ring(P.x, P.y, '#9fe4ff', 40, 120, 4);
+  } else if (kind === 'bomb') {
+    const camX = P.x - W / 2, camY = P.y - H / 2;
+    let n = 0;
+    for (let i = G.enemies.length - 1; i >= 0; i--) {
+      const e = G.enemies[i];
+      if (e.elite || e.boss) continue;
+      if (e.x < camX - 60 || e.x > camX + W + 60 || e.y < camY - 60 || e.y > camY + H + 60) continue;
+      burst(e.x, e.y, '#ffb347', 12, 240, 4, 0.6);
+      G.enemies.splice(i, 1);
+      G.kills++;
+      dropXp(e); dropGold(e);
+      n++;
+    }
+    G.shake = 18; G.flashT = 0.3;
+    toast('💣 炸药：摧毁视野内 ' + n + ' 个普通敌人', 1800);
+    ring(P.x, P.y, '#ffb347', 46, 140, 5);
+  } else if (kind === 'heart') {
+    const heal = Math.min(25, P.maxHp - P.hp);
+    P.hp = Math.min(P.maxHp, P.hp + 25);
+    toast('❤ 爱心：恢复 ' + Math.round(heal) + ' 点生命', 1500);
+    floatText(P.x, P.y - 40, '+' + Math.round(heal), '#ff8fa3');
+    ring(P.x, P.y, '#ff6b8f', 22, 60, 3.5);
+    burst(P.x, P.y, '#ff8fa3', 16, 180, 3.5, 0.6);
+  }
+}
+
+/* ---- 升级 ---- */
+function gainXp(v) {
+  P.xp += v * (P.xpMul || 1);   // 超时空军团：双倍经验
+  while (P.xp >= P.xpNeed) {
+    P.xp -= P.xpNeed;
+    P.level++;
+    P.xpNeed = xpNeeded(P.level);
+    G.pendingLevels++;
+    burst(P.x, P.y, '#4ea8ff', 16, 200, 3.4, 0.6);
+  }
+  if (G.pendingLevels > 0 && !G.levelUpOpen) openLevelUp();
+}
+
+function updateParticles(dt) {
+  for (let i = G.particles.length - 1; i >= 0; i--) {
+    const p = G.particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { G.particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 0.94; p.vy *= 0.94;
+  }
+  for (let i = G.texts.length - 1; i >= 0; i--) {
+    const t = G.texts[i];
+    t.life -= dt; t.y -= 34 * dt;
+    if (t.life <= 0) G.texts.splice(i, 1);
+  }
+  // 闪现残影
+  for (let i = G.trail.length - 1; i >= 0; i--) {
+    const t = G.trail[i];
+    t.life -= dt;
+    if (t.life <= 0) G.trail.splice(i, 1);
+  }
+}
+
+/* ==========================================================================
+   12. 主循环
+   ========================================================================== */
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  dt = Math.min(dt, 0.05); // 掉帧保护
+  if (G.running && !G.paused) {
+    // 2 倍速：把一帧拆成两次等长更新，物理精度不受影响
+    const steps = G.speed2 ? 2 : 1;
+    for (let s = 0; s < steps; s++) {
+      G.elapsed += dt;
+      if (G.freeze > 0) G.freeze = Math.max(0, G.freeze - dt);
+      updatePlayer(dt);
+      buildGrid();
+      spawnLogic(dt);
+      updateEnemies(dt);
+      updateBullets(dt);
+      updateHexRuntime(dt);
+      updateZones(dt);
+      updatePickups(dt);
+      updateParticles(dt);
+      if (G.shake > 0) G.shake = Math.max(0, G.shake - dt * 40);
+      if (G.flashT > 0) G.flashT = Math.max(0, G.flashT - dt);
+    }
+  } else {
+    updateParticles(dt * 0.35);
+  }
+  render();
+  updateHUD();
+  // 金币存档节流
+  saveTick += dt;
+  if (saveTick > 2 && G.running) { saveTick = 0; saveMeta(); }
+  requestAnimationFrame(frame);
+}
+
+/* ==========================================================================
+   13. 渲染
+   ========================================================================== */
+let camX = 0, camY = 0;
+
+function shapePath(c, shape, r) {
+  switch (shape) {
+    case 'tri':
+      c.beginPath(); c.moveTo(0, -r); c.lineTo(r * 0.9, r * 0.75); c.lineTo(-r * 0.9, r * 0.75); c.closePath(); break;
+    case 'diamond':
+      c.beginPath(); c.moveTo(0, -r); c.lineTo(r * 0.8, 0); c.lineTo(0, r); c.lineTo(-r * 0.8, 0); c.closePath(); break;
+    case 'square':
+      c.beginPath(); c.rect(-r * 0.85, -r * 0.85, r * 1.7, r * 1.7); break;
+    case 'penta':
+      c.beginPath();
+      for (let i = 0; i < 5; i++) { const a = -Math.PI / 2 + i * TAU / 5; const x = Math.cos(a) * r, y = Math.sin(a) * r; i ? c.lineTo(x, y) : c.moveTo(x, y); }
+      c.closePath(); break;
+    case 'hex':
+      c.beginPath();
+      for (let i = 0; i < 6; i++) { const a = i * TAU / 6; const x = Math.cos(a) * r, y = Math.sin(a) * r; i ? c.lineTo(x, y) : c.moveTo(x, y); }
+      c.closePath(); break;
+    case 'star':
+      c.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const a = -Math.PI / 2 + i * Math.PI / 5;
+        const rr = i % 2 ? r * 0.46 : r;
+        const x = Math.cos(a) * rr, y = Math.sin(a) * rr;
+        i ? c.lineTo(x, y) : c.moveTo(x, y);
+      }
+      c.closePath(); break;
+    default:
+      c.beginPath(); c.arc(0, 0, r, 0, TAU);
+  }
+}
+
+function render() {
+  const shakeX = G.shake ? rand(-G.shake, G.shake) * 0.5 : 0;
+  const shakeY = G.shake ? rand(-G.shake, G.shake) * 0.5 : 0;
+  camX = P.x - W / 2 + shakeX;
+  camY = P.y - H / 2 + shakeY;
+
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = '#07070d';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(-camX, -camY);
+  drawGround();
+
+  // --- 闪现残影 ---
+  for (const t of G.trail) {
+    const a = clamp(t.life / t.max, 0, 1);
+    ctx.globalAlpha = a * 0.45;
+    ctx.beginPath(); ctx.arc(t.x, t.y, t.r * (0.35 + a * 0.65), 0, TAU);
+    ctx.fillStyle = '#b98bff'; ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // --- 地面预警区（地刺 / 电场 / 陨石）---
+  for (const z of G.zones) {
+    const warn = z.kind !== 'field';
+    const k = warn ? clamp(1 - z.t / (z.kind === 'meteor' ? 1.2 : 1.0), 0, 1) : 1;
+    ctx.save();
+    if (z.kind === 'field') {
+      ctx.globalAlpha = 0.18 + 0.08 * Math.sin(performance.now() / 120);
+      ctx.fillStyle = z.color;
+      ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 0.6; ctx.strokeStyle = z.color; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, TAU); ctx.stroke();
+    } else {
+      ctx.globalAlpha = 0.10 + k * 0.22;
+      ctx.fillStyle = z.color;
+      ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 0.85;
+      ctx.strokeStyle = z.color; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, TAU); ctx.stroke();
+      ctx.globalAlpha = 0.9;
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(z.x, z.y, z.r * k, 0, TAU); ctx.stroke();
+      if (z.kind === 'meteor') {
+        ctx.globalAlpha = 0.5 + k * 0.5;
+        ctx.beginPath(); ctx.arc(z.x, z.y, 10 + k * 10, 0, TAU);
+        ctx.fillStyle = '#ff2f6d'; ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  // --- 冰痕路径 ---
+  for (const t of G.iceTrails) {
+    const a = clamp(t.life / t.max, 0, 1);
+    ctx.globalAlpha = a * 0.30;
+    ctx.beginPath(); ctx.arc(t.x, t.y, t.r, 0, TAU);
+    ctx.fillStyle = '#bfe9ff'; ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // --- 拾取物 ---
+  for (const p of G.pickups) drawPickup(p);
+
+  // --- 敌人 ---
+  for (const e of G.enemies) drawEnemy(e);
+
+  // --- 技能弹丸 ---
+  for (const s of G.shots) {
+    ctx.save();
+    ctx.shadowBlur = 10; ctx.shadowColor = s.color;
+    ctx.fillStyle = s.color;
+    if (s.kind === 'coin') { ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.fill(); }
+    else if (s.kind === 'dryice') {
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 0.4; ctx.beginPath(); ctx.arc(s.x, s.y, s.r * 1.9, 0, TAU); ctx.fill();
+    } else if (s.kind === 'beedrone') {
+      ctx.translate(s.x, s.y); ctx.rotate(performance.now() / 90);
+      ctx.beginPath();
+      ctx.moveTo(0, -s.r); ctx.lineTo(s.r, 0); ctx.lineTo(0, s.r); ctx.lineTo(-s.r, 0);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(80,60,10,.7)';
+      ctx.beginPath(); ctx.arc(0, 0, s.r * 0.3, 0, TAU); ctx.fill();
+    } else if (s.kind === 'thermo') {
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 0.35; ctx.fillStyle = '#ff6b2b';
+      ctx.beginPath(); ctx.arc(s.x - s.vx * 0.012, s.y - s.vy * 0.012, s.r * 0.8, 0, TAU); ctx.fill();
+    } else {
+      const a = Math.atan2(s.vy, s.vx);
+      ctx.translate(s.x, s.y); ctx.rotate(a);
+      ctx.beginPath(); ctx.ellipse(0, 0, s.r * 1.5, s.r * 0.72, 0, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // --- 光束：四种形态互相区分 ---
+  for (const b of G.beams) {
+    const p = clamp(b.life / b.max, 0, 1);
+    const a = beamAlpha(p);                    // 平滑生成/消失
+    const grow = 0.55 + 0.45 * Math.min(1, (1 - p) / 0.14);   // 宽度由细到满
+    const dx = b.x1 - b.x0, dy = b.y1 - b.y0;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.shadowBlur = 18; ctx.shadowColor = b.color;
+
+    if (b.jagged) {
+      /* 威能闪电：锯齿折线 */
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = b.w * (0.5 + a * 0.5) * grow;
+      ctx.beginPath();
+      const seg = 9;
+      ctx.moveTo(b.x0, b.y0);
+      for (let i = 1; i <= seg; i++) {
+        const t = i / seg;
+        const jx = i === seg ? 0 : rand(-16, 16), jy = i === seg ? 0 : rand(-6, 6);
+        ctx.lineTo(b.x0 + dx * t + jx, b.y0 + dy * t + jy);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = a * 0.3; ctx.lineWidth = b.w * 2.4 * grow; ctx.stroke();
+    } else if (b.kind === 'ion') {
+      /* 离子斩：中心纯白色，向外围渐变消失 */
+      const half = b.w * 3.2 * grow;                     // 半宽
+      const px0 = b.x0 - uy * half, py0 = b.y0 + ux * half;   // 垂直方向的两端
+      const px1 = b.x0 + uy * half, py1 = b.y0 - ux * half;
+      const grad = ctx.createLinearGradient(px0, py0, px1, py1);
+      grad.addColorStop(0.00, 'rgba(255,255,255,0)');
+      grad.addColorStop(0.28, 'rgba(255,255,255,' + (a * 0.35) + ')');
+      grad.addColorStop(0.50, 'rgba(255,255,255,' + a + ')');
+      grad.addColorStop(0.72, 'rgba(255,255,255,' + (a * 0.35) + ')');
+      grad.addColorStop(1.00, 'rgba(255,255,255,0)');
+      ctx.globalAlpha = 1;
+      ctx.shadowBlur = 22; ctx.shadowColor = 'rgba(255,255,255,.9)';
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = half * 2;
+      ctx.beginPath(); ctx.moveTo(b.x0, b.y0); ctx.lineTo(b.x1, b.y1); ctx.stroke();
+      // 纯白核心
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(255,255,255,' + a + ')';
+      ctx.lineWidth = b.w * 0.55 * grow;
+      ctx.beginPath(); ctx.moveTo(b.x0, b.y0); ctx.lineTo(b.x1, b.y1); ctx.stroke();
+      // 沿光束的垂直斩痕（白色渐隐）
+      ctx.strokeStyle = 'rgba(255,255,255,' + (a * 0.55) + ')';
+      ctx.lineWidth = 2.5;
+      for (let i = 1; i <= 7; i++) {
+        const qx = b.x0 + dx * (i / 8), qy = b.y0 + dy * (i / 8);
+        const w = 14 + (i % 2) * 9;
+        ctx.beginPath();
+        ctx.moveTo(qx - uy * w, qy + ux * w);
+        ctx.lineTo(qx + uy * w, qy - ux * w);
+        ctx.stroke();
+      }
+      // 中心菱形（纯白）
+      const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+      ctx.globalAlpha = a;
+      ctx.translate(cx, cy); ctx.rotate(Math.atan2(dy, dx) + performance.now() / 300);
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(0, -13); ctx.lineTo(13, 0); ctx.lineTo(0, 13); ctx.lineTo(-13, 0);
+      ctx.closePath(); ctx.fill();
+    } else {
+      /* 高能射线 / 闪击射线：图案完全一致，仅颜色不同 */
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = b.w * (0.6 + a * 0.4) * grow;
+      ctx.beginPath(); ctx.moveTo(b.x0, b.y0); ctx.lineTo(b.x1, b.y1); ctx.stroke();
+      ctx.globalAlpha = a * 0.3; ctx.lineWidth = b.w * 2.8 * grow; ctx.stroke();
+      ctx.globalAlpha = a * 0.95;
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = b.w * 0.34 * grow;
+      ctx.beginPath(); ctx.moveTo(b.x0, b.y0); ctx.lineTo(b.x1, b.y1); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // --- 切割无人机 ---
+  const drone = P.skills && P.skills.drone;
+  if (drone) {
+    const R = 78 + drone.sizeMul * 10, size = 12 * DRONE_BASE_SIZE * drone.sizeMul;
+    for (let i = 0; i < drone.count; i++) {
+      const a = drone.ang + (i / drone.count) * TAU;
+      const ox = P.x + Math.cos(a) * R, oy = P.y + Math.sin(a) * R;
+      ctx.save();
+      ctx.translate(ox, oy); ctx.rotate(drone.ang * 2.6);
+      ctx.shadowBlur = 12; ctx.shadowColor = '#c8d2ff';
+      ctx.fillStyle = '#dfe6ff';
+      ctx.beginPath();
+      ctx.moveTo(0, -size); ctx.lineTo(size, 0); ctx.lineTo(0, size); ctx.lineTo(-size, 0);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+    // 工蜂追击：外圈反向旋转的淡黄色工蜂
+    if (drone.flags.bees) {
+      const RB = R + 46, bsize = size * 0.85;
+      for (let i = 0; i < drone.count; i++) {
+        const a = drone.beeAng + (i / drone.count) * TAU;
+        const ox = P.x + Math.cos(a) * RB, oy = P.y + Math.sin(a) * RB;
+        ctx.save();
+        ctx.translate(ox, oy); ctx.rotate(-drone.beeAng * 3.2);
+        ctx.shadowBlur = 12; ctx.shadowColor = '#ffe9a8';
+        ctx.fillStyle = '#ffe9a8';
+        ctx.beginPath();
+        ctx.moveTo(0, -bsize); ctx.lineTo(bsize, 0); ctx.lineTo(0, bsize); ctx.lineTo(-bsize, 0);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = 'rgba(80,60,10,.75)';
+        ctx.beginPath(); ctx.arc(0, 0, bsize * 0.3, 0, TAU); ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+  // --- 敌人子弹（强化可见度：外光晕 + 白芯 + 预警环）---
+  for (const b of G.ebullets) {
+    ctx.save();
+    const pulse = 1 + Math.sin(performance.now() / 110 + b.x) * 0.14;
+    ctx.shadowBlur = 26; ctx.shadowColor = b.color;
+    ctx.globalAlpha = 0.34;
+    ctx.fillStyle = b.color;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 2.05 * pulse, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.45, 0, TAU);
+    ctx.fillStyle = '#fff'; ctx.fill();
+    // 飞行拖尾
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(b.x - b.vx * 0.03, b.y - b.vy * 0.03);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineWidth = b.r * 1.3; ctx.lineCap = 'round';
+    ctx.strokeStyle = b.color; ctx.stroke();
+    ctx.restore();
+  }
+
+  // --- 主角（几何图形） ---
+  drawPlayer();
+
+  // --- 粒子 ---
+  for (const p of G.particles) {
+    const a = clamp(p.life / p.max, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    const s = p.size * (0.4 + a * 0.6);
+    ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+  }
+  ctx.globalAlpha = 1;
+
+  // --- 飘字 ---
+  ctx.textAlign = 'center';
+  for (const t of G.texts) {
+    ctx.globalAlpha = clamp(t.life / t.max, 0, 1);
+    ctx.font = 'bold 14px system-ui,sans-serif';
+    ctx.fillStyle = t.color;
+    ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.lineWidth = 3;
+    ctx.strokeText(t.text, t.x, t.y);
+    ctx.fillText(t.text, t.x, t.y);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+
+  // --- 视野光晕 ---
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.32, W / 2, H / 2, Math.max(W, H) * 0.72);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.62)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, W, H);
+
+  // --- 冰冻遮罩 ---
+  if (G.freeze > 0) {
+    ctx.fillStyle = 'rgba(110,190,255,' + (0.06 + 0.05 * Math.sin(performance.now() / 160)) + ')';
+    ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    ctx.font = 'bold 22px system-ui,sans-serif';
+    ctx.fillStyle = 'rgba(190,230,255,.9)';
+    ctx.textAlign = 'center';
+    ctx.fillText('⏱ 时间凝滞 ' + G.freeze.toFixed(1) + 's', W / 2, H - 92);
+    ctx.restore();
+  }
+  // --- 爆炸白闪 ---
+  if (G.flashT > 0) {
+    ctx.fillStyle = 'rgba(255,255,255,' + (G.flashT * 0.9) + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // --- 虚拟摇杆（半透明） ---
+  if (G.running && !G.paused) drawJoystick();
+}
+
+function drawGround() {
+  const GRID = 120;
+  const x0 = Math.floor(camX / GRID) * GRID;
+  const y0 = Math.floor(camY / GRID) * GRID;
+  const x1 = camX + W + GRID, y1 = camY + H + GRID;
+
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(90,120,200,0.09)';
+  ctx.beginPath();
+  for (let x = x0; x <= x1; x += GRID) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
+  for (let y = y0; y <= y1; y += GRID) { ctx.moveTo(x0, y); ctx.lineTo(x1, y); }
+  ctx.stroke();
+
+  // 哈希无缝地形：循环无限，且同一坐标永远一致
+  const cell = 240;
+  const cx0 = Math.floor(camX / cell), cx1 = Math.floor((camX + W) / cell);
+  const cy0 = Math.floor(camY / cell), cy1 = Math.floor((camY + H) / cell);
+  for (let cx = cx0; cx <= cx1; cx++) {
+    for (let cy = cy0; cy <= cy1; cy++) {
+      const h = hash2(cx, cy);
+      if (h < 0.30) continue;
+      const px = cx * cell + (hash2(cx + 77, cy) * 0.6 + 0.2) * cell;
+      const py = cy * cell + (hash2(cx, cy + 31) * 0.6 + 0.2) * cell;
+      const r = 6 + h * 16;
+      ctx.globalAlpha = 0.05 + h * 0.07;
+      ctx.fillStyle = h > 0.8 ? '#5b7dff' : '#2b3a63';
+      if (h > 0.72) {
+        ctx.beginPath();
+        ctx.moveTo(px, py - r); ctx.lineTo(px + r, py); ctx.lineTo(px, py + r); ctx.lineTo(px - r, py);
+        ctx.closePath(); ctx.fill();
+      } else {
+        ctx.beginPath(); ctx.arc(px, py, r, 0, TAU); ctx.fill();
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPlayer() {
+  const r = P.r;
+  ctx.save();
+  ctx.translate(P.x, P.y);
+  // 外圈（无敌时变为金色高亮环）
+  const inv = P.invT > 0;
+  ctx.beginPath(); ctx.arc(0, 0, r + 8 + Math.sin(performance.now() / (inv ? 90 : 380)) * (inv ? 4 : 1.6), 0, TAU);
+  ctx.strokeStyle = inv ? 'rgba(255,225,130,.85)' : 'rgba(120,200,255,.28)';
+  ctx.lineWidth = inv ? 3 : 2; ctx.stroke();
+  // 主体
+  const g = ctx.createRadialGradient(-4, -5, 1, 0, 0, r);
+  g.addColorStop(0, P.hurtT > 0 ? '#ffffff' : '#a9e6ff');
+  g.addColorStop(1, P.hurtT > 0 ? '#ff6f8b' : '#2a7bd6');
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = '#dff1ff'; ctx.stroke();
+  // 朝向三角
+  ctx.rotate(Math.atan2(P.aimY, P.aimX));
+  ctx.beginPath(); ctx.moveTo(r - 1, 0); ctx.lineTo(r * 0.2, -r * 0.5); ctx.lineTo(r * 0.2, r * 0.5);
+  ctx.closePath(); ctx.fillStyle = '#eaf7ff'; ctx.fill();
+  ctx.restore();
+
+  // 霜铸甲胄护盾层
+  const fa = P.skills && P.skills.frostarmor;
+  if (fa && fa.layer > 0) {
+    for (let i = 0; i < fa.layer; i++) {
+      ctx.beginPath();
+      ctx.arc(P.x, P.y, P.r + 12 + i * 7, 0, TAU);
+      ctx.strokeStyle = 'rgba(169,230,255,.55)'; ctx.lineWidth = 3; ctx.stroke();
+    }
+  }
+  if (P.shieldInv > 0) {
+    ctx.beginPath(); ctx.arc(P.x, P.y, P.r + 22 + Math.sin(performance.now() / 80) * 3, 0, TAU);
+    ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 3; ctx.stroke();
+  }
+  // 飞天姿态（悬浮中：双层光环 + 浮空起伏）
+  if (P.flyT > 0) {
+    const bob = Math.sin(performance.now() / 120) * 4;
+    ctx.beginPath(); ctx.arc(P.x, P.y + bob, P.r + 26, 0, TAU);
+    ctx.strokeStyle = 'rgba(201,168,255,.8)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.beginPath(); ctx.arc(P.x, P.y + bob, P.r + 40, 0, TAU);
+    ctx.strokeStyle = 'rgba(201,168,255,.28)'; ctx.lineWidth = 2; ctx.stroke();
+  }
+  // 飞天姿态落地动画：扩散冲击环 + 地面放射裂痕
+  if (G.landFx > 0) {
+    const a = clamp(G.landFx / 0.55, 0, 1);
+    const rr = (1 - a) * 240 + 20;
+    ctx.save();
+    ctx.globalAlpha = a * 0.85;
+    ctx.strokeStyle = '#e6d8ff'; ctx.lineWidth = 6 * a + 1;
+    ctx.beginPath(); ctx.arc(P.x, P.y, rr, 0, TAU); ctx.stroke();
+    ctx.globalAlpha = a * 0.45;
+    ctx.strokeStyle = '#c9a8ff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(P.x, P.y, rr * 0.72, 0, TAU); ctx.stroke();
+    ctx.globalAlpha = a * 0.75;
+    ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2;
+    for (let i = 0; i < 10; i++) {
+      const ang = (i / 10) * TAU + 0.3;
+      const r0 = 18, r1 = 40 + (1 - a) * 130;
+      ctx.beginPath();
+      ctx.moveTo(P.x + Math.cos(ang) * r0, P.y + Math.sin(ang) * r0 * 0.6);
+      ctx.lineTo(P.x + Math.cos(ang) * r1, P.y + Math.sin(ang) * r1 * 0.6);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  // 拾取范围提示
+  ctx.beginPath(); ctx.arc(P.x, P.y, P.pickup, 0, TAU);
+  ctx.strokeStyle = 'rgba(120,170,255,.07)'; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+function drawEnemy(e) {
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.rotate(e.rot * 0.35);
+  const frozen = G.freeze > 0;
+  const slowed = e.slowT > 0;
+  const vulned = e.vulnT > 0;
+  const col = frozen ? '#8fd3ff' : slowed ? '#a9c8ff' : e.color;
+  const r = e.r;
+  // 负面状态标记：蓝色外环 = 减速，红色外环 = 易伤
+  if (slowed || vulned) {
+    ctx.globalAlpha = 0.4;
+    if (slowed) {
+      ctx.beginPath(); ctx.arc(0, 0, r + 5, 0, TAU);
+      ctx.strokeStyle = '#7fb6ff'; ctx.lineWidth = 2; ctx.stroke();
+    }
+    if (vulned) {
+      ctx.beginPath(); ctx.arc(0, 0, r + 9, 0, TAU);
+      ctx.strokeStyle = '#ff7b7b'; ctx.lineWidth = 2; ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if (e.elite || e.boss) {
+    ctx.globalAlpha = 0.28;
+    ctx.beginPath(); ctx.arc(0, 0, r * 1.6 + Math.sin(performance.now() / 220) * 4, 0, TAU);
+    ctx.fillStyle = col; ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  // 主体
+  shapePath(ctx, e.shape, r);
+  ctx.fillStyle = e.flash > 0 ? '#ffffff' : col;
+  ctx.globalAlpha = e.flash > 0 ? 1 : 0.9;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = e.boss ? 4 : e.elite ? 3 : 1.6;
+  ctx.strokeStyle = e.boss ? '#ffd6e2' : e.elite ? '#fff3c4' : 'rgba(0,0,0,.45)';
+  ctx.stroke();
+  // 内核
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.28, 0, TAU);
+  ctx.fillStyle = frozen ? '#e8f7ff' : 'rgba(0,0,0,.42)';
+  ctx.fill();
+
+  // 精英 / Boss：头顶以图标显示当前承受的负面状态
+  if (e.elite || e.boss) {
+    const icons = [];
+    if (e.frozenT > 0) icons.push(['❄', '#8fd3ff']);
+    if (e.paralyzeT > 0) icons.push(['⚡', '#ffe066']);
+    if (e.slowT > 0) icons.push(['🐌', '#7fb6ff']);
+    if (e.burnT > 0) icons.push(['🔥', '#ff7b47']);
+    if (e.shockT > 0) icons.push(['✨', '#fff2a8']);
+    if (e.vulnT > 0) icons.push(['💥', '#ff7b7b']);
+    if (e.frostStacks > 0) icons.push(['❅' + e.frostStacks, '#bfe9ff']);
+    if (icons.length) {
+      ctx.rotate(-e.rot * 0.35);
+      ctx.font = 'bold 15px system-ui,sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const w = icons.length * 19;
+      let px = -w / 2 + 9;
+      const py = -r - 34;
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = 'rgba(6,8,18,.85)';
+      ctx.beginPath();
+      if (ctx.roundRect) { ctx.roundRect(-w / 2 - 5, py - 11, w + 10, 22, 7); ctx.fill(); }
+      else ctx.fillRect(-w / 2 - 5, py - 11, w + 10, 22);
+      ctx.globalAlpha = 1;
+      for (const ic of icons) {
+        ctx.fillStyle = ic[1];
+        ctx.fillText(ic[0], px, py + 1);
+        px += 19;
+      }
+      ctx.rotate(e.rot * 0.35);
+    }
+  }
+
+  // 精英名称
+  if (e.elite && e.eliteName) {
+    ctx.rotate(-e.rot * 0.35);
+    ctx.font = 'bold 12px system-ui,sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = 'rgba(0,0,0,.75)';
+    ctx.fillText(e.eliteName, 0, -r - 42);
+    ctx.fillStyle = e.color;
+    ctx.fillText(e.eliteName, 0, -r - 43);
+    ctx.rotate(e.rot * 0.35);
+  }
+
+  // 血条（非满血时显示）
+  if ((e.elite || e.boss) && e.hp < e.maxHp) {
+    ctx.rotate(-e.rot * 0.35);
+    const w = r * 2.2;
+    ctx.fillStyle = 'rgba(0,0,0,.6)';
+    ctx.fillRect(-w / 2, -r - 16, w, 5);
+    ctx.fillStyle = e.boss ? '#ff2f6d' : '#ffd54a';
+    ctx.fillRect(-w / 2, -r - 16, w * clamp(e.hp / e.maxHp, 0, 1), 5);
+  }
+  ctx.restore();
+}
+
+function drawPickup(p) {
+  const bob = Math.sin(performance.now() / 320 + p.t * 2) * 2;
+  ctx.save();
+  ctx.translate(p.x, p.y + bob);
+  if (p.type === 'xp') {
+    ctx.shadowBlur = 10; ctx.shadowColor = '#4ea8ff';
+    ctx.fillStyle = '#8fd3ff';
+    ctx.beginPath();
+    ctx.moveTo(0, -p.r); ctx.lineTo(p.r, 0); ctx.lineTo(0, p.r); ctx.lineTo(-p.r, 0);
+    ctx.closePath(); ctx.fill();
+  } else if (p.type === 'gold') {
+    ctx.shadowBlur = 10; ctx.shadowColor = '#ffcf4d';
+    ctx.fillStyle = '#ffd76b';
+    ctx.beginPath(); ctx.arc(0, 0, p.r, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(160,110,10,.8)';
+    ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('¥', 0, 0.5);
+  } else if (p.type === 'card') {
+    const pu = 1 + Math.sin(performance.now() / 200) * 0.12;
+    ctx.scale(pu, pu);
+    ctx.shadowBlur = 18; ctx.shadowColor = '#ffd166';
+    ctx.fillStyle = '#2b2350'; ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.rect(-12, -16, 24, 32); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ffd166';
+    ctx.beginPath();
+    ctx.moveTo(0, -8); ctx.lineTo(6, 2); ctx.lineTo(0, 8); ctx.lineTo(-6, 2);
+    ctx.closePath(); ctx.fill();
+  } else if (p.type === 'hex') {
+    const pu = 1 + Math.sin(performance.now() / 240) * 0.12;
+    ctx.scale(pu, pu);
+    ctx.shadowBlur = 18; ctx.shadowColor = '#c08bff';
+    ctx.strokeStyle = '#c08bff'; ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) { const a = i * TAU / 6; const x = Math.cos(a) * 15, y = Math.sin(a) * 15; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle = 'rgba(192,139,255,.28)'; ctx.fill();
+  } else if (p.type === 'shard') {
+    const pu = 1 + Math.sin(performance.now() / 200) * 0.14;
+    ctx.scale(pu, pu);
+    ctx.shadowBlur = 16; ctx.shadowColor = '#c08bff';
+    ctx.fillStyle = '#c08bff';
+    ctx.beginPath();
+    ctx.moveTo(0, -13); ctx.lineTo(9, -3); ctx.lineTo(0, 13); ctx.lineTo(-9, -3);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    ctx.beginPath(); ctx.moveTo(0, -8); ctx.lineTo(4, -2); ctx.lineTo(0, 4); ctx.lineTo(-4, -2);
+    ctx.closePath(); ctx.fill();
+  } else if (p.type === 'item') {
+    const ic = p.kind === 'heart' ? '#ff6b8f' : p.kind === 'bomb' ? '#ffb347' : '#7fd7ff';
+    ctx.shadowBlur = 16; ctx.shadowColor = ic;
+    ctx.beginPath(); ctx.arc(0, 0, 15, 0, TAU);
+    ctx.fillStyle = 'rgba(20,30,60,.9)'; ctx.fill();
+    ctx.strokeStyle = ic; ctx.lineWidth = 2; ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 15px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#dff1ff';
+    ctx.fillText(p.kind === 'magnet' ? '🧲' : p.kind === 'watch' ? '⏱' : p.kind === 'heart' ? '❤' : '💣', 0, 1);
+  }
+  ctx.restore();
+}
+
+function drawJoystick() {
+  if (J.on) {
+    ctx.save();
+    ctx.globalAlpha = 0.30;
+    ctx.beginPath(); ctx.arc(J.ox, J.oy, JOY_R, 0, TAU);
+    ctx.fillStyle = 'rgba(120,170,255,.15)'; ctx.fill();
+    ctx.strokeStyle = '#9fc9ff'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath(); ctx.arc(J.cx, J.cy, 26, 0, TAU);
+    ctx.fillStyle = '#bfe0ff'; ctx.fill();
+    ctx.restore();
+  } else if ('ontouchstart' in window) {
+    // 未触摸时左下角显示半透明提示轮盘
+    const bx = 92, by = H - 104;
+    ctx.save();
+    ctx.globalAlpha = 0.12;
+    ctx.beginPath(); ctx.arc(bx, by, JOY_R, 0, TAU);
+    ctx.strokeStyle = '#9fc9ff'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(bx, by, 26, 0, TAU);
+    ctx.fillStyle = '#9fc9ff'; ctx.fill();
+    ctx.restore();
+  }
+}
+
+/* ---- 小地图（需求 10：只显示范围内精英 / 其掉落物 / 道具） ---- */
+function drawMini() {
+  const S = 150, R = S / 2, k = (R - 6) / MINI_RANGE;
+  mctx.clearRect(0, 0, S, S);
+  mctx.save();
+  mctx.beginPath(); mctx.arc(R, R, R - 1, 0, TAU);
+  mctx.fillStyle = 'rgba(8,10,20,.78)'; mctx.fill();
+  mctx.clip();
+  // 十字刻度
+  mctx.strokeStyle = 'rgba(110,150,255,.18)'; mctx.lineWidth = 1;
+  mctx.beginPath();
+  mctx.moveTo(R, 6); mctx.lineTo(R, S - 6);
+  mctx.moveTo(6, R); mctx.lineTo(S - 6, R);
+  mctx.stroke();
+  mctx.beginPath(); mctx.arc(R, R, (R - 6) * 0.5, 0, TAU); mctx.stroke();
+
+  // 精英 / Boss
+  for (const e of G.enemies) {
+    if (!e.elite && !e.boss) continue;
+    const dx = (e.x - P.x) * k, dy = (e.y - P.y) * k;
+    if (dx * dx + dy * dy > (R - 8) * (R - 8)) continue;
+    mctx.save();
+    mctx.translate(R + dx, R + dy);
+    mctx.fillStyle = e.boss ? '#ff2f6d' : '#ffd54a';
+    mctx.shadowBlur = 8; mctx.shadowColor = mctx.fillStyle;
+    const rr = e.boss ? 6 : 4.5;
+    if (e.boss) {
+      mctx.beginPath();
+      for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5; const q = i % 2 ? rr * 0.5 : rr; i ? mctx.lineTo(Math.cos(a) * q, Math.sin(a) * q) : mctx.moveTo(Math.cos(a) * q, Math.sin(a) * q); }
+      mctx.closePath(); mctx.fill();
+    } else {
+      mctx.beginPath();
+      for (let i = 0; i < 6; i++) { const a = i * TAU / 6; const x = Math.cos(a) * rr, y = Math.sin(a) * rr; i ? mctx.lineTo(x, y) : mctx.moveTo(x, y); }
+      mctx.closePath(); mctx.fill();
+    }
+    mctx.restore();
+  }
+  // 精英掉落物（技能卡 / Hex）
+  for (const p of G.pickups) {
+    if (p.type !== 'card' && p.type !== 'hex') continue;
+    const dx = (p.x - P.x) * k, dy = (p.y - P.y) * k;
+    if (dx * dx + dy * dy > (R - 8) * (R - 8)) continue;
+    mctx.fillStyle = p.type === 'card' ? '#ffd166' : '#c08bff';
+    mctx.fillRect(R + dx - 3, R + dy - 3, 6, 6);
+  }
+  // 道具
+  for (const p of G.pickups) {
+    if (p.type !== 'item') continue;
+    const dx = (p.x - P.x) * k, dy = (p.y - P.y) * k;
+    if (dx * dx + dy * dy > (R - 8) * (R - 8)) continue;
+    mctx.beginPath(); mctx.arc(R + dx, R + dy, 4, 0, TAU);
+    mctx.fillStyle = '#7fd7ff'; mctx.fill();
+  }
+
+  mctx.restore();
+  // 外框
+  mctx.beginPath(); mctx.arc(R, R, R - 1, 0, TAU);
+  mctx.strokeStyle = 'rgba(130,170,255,.55)'; mctx.lineWidth = 2; mctx.stroke();
+  // 玩家
+  mctx.beginPath(); mctx.arc(R, R, 4, 0, TAU);
+  mctx.fillStyle = '#eaf7ff'; mctx.fill();
+  mctx.beginPath();
+  mctx.moveTo(R + P.aimX * 9, R + P.aimY * 9);
+  mctx.lineTo(R - P.aimY * 4, R + P.aimX * 4);
+  mctx.lineTo(R + P.aimY * 4, R - P.aimX * 4);
+  mctx.closePath(); mctx.fillStyle = 'rgba(234,247,255,.8)'; mctx.fill();
+}
+
+/* ==========================================================================
+   14. HUD 更新
+   ========================================================================== */
+const $hpFill = $('#hpFill'), $hpText = $('#hpText');
+const $xpFill = $('#xpFill'), $xpText = $('#xpText');
+const $enFill = $('#enFill'), $enText = $('#enText');
+const $lv = $('#lvBadge'), $timer = $('#timer'), $goldLine = $('#goldLine');
+const $bossFill = $('#bossFill');
+const $pips = document.querySelectorAll('#chargeBox .pip');
+const $skillHint = $('#skillHint');
+let lastBuffSig = '';
+
+function updateHUD() {
+  const hpP = clamp(P.hp / P.maxHp, 0, 1);
+  $hpFill.style.width = (hpP * 100) + '%';
+  $hpText.textContent = Math.ceil(P.hp) + ' / ' + Math.round(P.maxHp);
+  const xpP = clamp(P.xp / P.xpNeed, 0, 1);
+  $xpFill.style.width = (xpP * 100) + '%';
+  $xpText.textContent = Math.floor(P.xp) + ' / ' + P.xpNeed;
+  // 主动技能能量条 + 充能点
+  const enP = clamp(P.energy / P.maxEnergy, 0, 1);
+  $enFill.style.width = (enP * 100) + '%';
+  const c = charges();
+  $enText.textContent = Math.floor(P.energy) + ' / ' + P.maxEnergy;
+  for (let i = 0; i < $pips.length; i++) $pips[i].classList.toggle('on', i < c);
+  // 技能行右侧：充能提示 / 无敌倒计时
+  if (P.invT > 0) {
+    $skillHint.textContent = '无敌 ' + P.invT.toFixed(1) + 's';
+    $skillHint.classList.add('inv');
+  } else {
+    $skillHint.textContent = '拔刀瞬闪 · 空格 ' + c + '/3';
+    $skillHint.classList.remove('inv');
+  }
+  updateSkillBtn();
+  $lv.textContent = 'Lv.' + P.level + (G.pendingLevels > 0 ? '  (可选卡 ×' + G.pendingLevels + ')' : '');
+  $timer.textContent = fmtTime(G.elapsed);
+  updateGoldText();
+  if (G.boss && G.enemies.indexOf(G.boss) >= 0) {
+    $bossFill.style.width = clamp(G.boss.hp / G.boss.maxHp, 0, 1) * 100 + '%';
+  }
+  drawMini();
+  updateBuffs();
+  updateSkillBar();
+}
+let lastSkillSig = '';
+function updateSkillBar() {
+  const ids = Object.keys(P.skills);
+  const hxN = P.hexes.length;
+  const sig = ids.join(',') + '|' + ids.map(i => P.skills[i].lvl).join(',') + '|' + hxN + '|' + P.actives.join(',') + '|' + (P.coinOn ? 1 : 0) + (P.flyT > 0 ? 1 : 0);
+  if (sig === lastSkillSig) return;
+  lastSkillSig = sig;
+  const bar = $('#skillBar');
+  bar.innerHTML = '';
+  for (const id of ids) {
+    const st = P.skills[id];
+    const d = SKILL_DEFS[id];
+    const el = document.createElement('span');
+    el.className = 'skChip';
+    el.innerHTML = d.ico + ' ' + d.name + ' <b>' + st.lvl + '</b>';
+    bar.appendChild(el);
+  }
+  const ac = $('#activeBar');
+  ac.innerHTML = '';
+  for (const a of P.actives) {
+    const d = ACTIVES[a];
+    const chip = document.createElement('span');
+    chip.className = 'acChip' + ((a === 'coin' && !P.coinOn) ? ' off' : '');
+    let state = '';
+    if (a === 'blink') state = charges() + '/3';
+    else if (a === 'fly') state = P.flyT > 0 ? '生效中' : Math.floor(P.energy / d.cost) + '次';
+    else if (a === 'coin') state = P.coinOn ? '开启' : '关闭';
+    chip.innerHTML = d.ico + ' ' + d.name + ' <b>' + d.key + '</b> ' + state;
+    ac.appendChild(chip);
+  }
+  if (hxN) {
+    const chip = document.createElement('span');
+    chip.className = 'acChip';
+    chip.innerHTML = '⬢ Hex <b>' + hxN + '</b>';
+    ac.appendChild(chip);
+  }
+}
+function updateBuffs() {
+  const sig = [P.attack, P.speed, P.pickup, P.crit, P.critDmgTotal, P.block, P.defMul, P.haste, P.luck, P.curse, P.lifesteal, P.debuff, P.regen, P.energyRegen].join('|');
+  if (sig === lastBuffSig) return;
+  lastBuffSig = sig;
+  const box = $('#buffRow');
+  box.innerHTML = '';
+  const red = 'rgba(255,110,140,.22)';
+  const items = [
+    ['⚔ ' + Math.round(P.attack), ''],
+    ['🛡 ' + Math.round((1 - P.defMul) * 100) + '%', ''],
+    ['▣ ' + Math.round(P.block), ''],
+    ['✸ ' + Math.round(P.crit * 100) + '%', ''],
+    ['✹ ' + Math.round(P.critDmgTotal * 100) + '%', ''],
+    ['⚡ ' + Math.round(P.haste), ''],
+    ['➤ ' + P.moveSpd.toFixed(1), ''],
+    ['⊕ ' + Math.round(P.pickup), ''],
+    ['🍀 ' + P.luck, ''],
+    ['☠ ' + P.curse, ''],
+    ['🩸 ' + (P.lifesteal * 100).toFixed(1) + '%', ''],
+    ['⏳ ' + Math.round(P.debuff * 100) + '%', ''],
+    ['✚ ' + P.regen.toFixed(1), ''],
+    ['🔋 ' + P.energyRegen.toFixed(2), '']
+  ];
+  for (const [txt, bg] of items) {
+    const d = document.createElement('span');
+    d.className = 'buff';
+    if (bg) d.style.background = bg;
+    d.textContent = txt;
+    box.appendChild(d);
+  }
+}
+function updateGoldText() {
+  $goldLine.textContent = '金币 ' + META.gold + (G.goldRun ? ' (+' + G.goldRun + ')' : '');
+}
+
+/* ==========================================================================
+   15. 升级选卡 UI
+   ========================================================================== */
+function openLevelUp() {
+  G.levelUpOpen = true;
+  G.paused = true;
+  showCards();
+  $('#levelScreen').classList.add('on');
+}
+/* 可用卡池：新技能（未满 5 个）+ 已解锁技能的可学词条（前置满足才出现） */
+function buildCardPool() {
+  const out = [];
+  const owned = Object.keys(P.skills).length;
+  if (owned < P.maxSkills) {
+    for (const id of SKILL_ORDER) {
+      if (P.skills[id]) continue;
+      const d = SKILL_DEFS[id];
+      out.push({ kind:'skill', w: d.w, id, ico:d.ico, name:d.name, desc:d.desc });
+    }
+  }
+  for (const m of MASTERIES) {
+    if (!P.skills[m.sk]) continue;                       // 必须先解锁技能
+    const lv = P.skillLv[m.id] || 0;
+    if (lv >= m.max) continue;
+    if (m.req) {
+      let ok = true;
+      for (const [rid, need] of m.req) if ((P.skillLv[rid] || 0) < need) { ok = false; break; }
+      if (!ok) continue;
+    }
+    if (m.reqSkill && !P.skills[m.reqSkill]) continue;
+    out.push({ kind:'mastery', w:m.w, m, ico: SKILL_DEFS[m.sk].ico, name:m.name,
+      desc:m.desc, sk:m.sk, lv, max:m.max });
+  }
+  return out;
+}
+function weightedPick(pool, n) {
+  const arr = pool.slice(), out = [];
+  for (let i = 0; i < n && arr.length; i++) {
+    let total = 0;
+    for (const c of arr) total += c.w;
+    let r = Math.random() * total, idx = 0;
+    for (let k = 0; k < arr.length; k++) { r -= arr[k].w; if (r <= 0) { idx = k; break; } }
+    out.push(arr.splice(idx, 1)[0]);
+  }
+  return out;
+}
+function showCards() {
+  const box = $('#cardBox');
+  box.innerHTML = '';
+  // 幸运：有概率把 3 选 1 变成 4 选 1
+  let count = 3;
+  if (Math.random() < P.p4) { count = 4; toast('🍀 幸运触发：4 选 1！', 1200); }
+  const chosen = weightedPick(buildCardPool(), count);
+  // 技能与词条全部学完：不再自动发钱，而是给出一张「获得 25 金币」词条供选择
+  if (!chosen.length) {
+    chosen.push({ kind:'gold', w:1, ico:'¤', name:'获得 25 金币',
+      desc:'已学完全部技能与词条，此处改为直接获得 25 金币' });
+  }
+  for (const c of chosen) {
+    const el = document.createElement('div');
+    el.className = 'card' + (c.kind === 'skill' ? ' skill' : '');
+    if (c.kind === 'skill') {
+      el.innerHTML =
+        '<div class="ico">' + c.ico + '</div>' +
+        '<div class="nm">' + c.name + '</div>' +
+        '<div class="ds">' + c.desc + '</div>' +
+        '<div class="ph">新技能（最多 ' + P.maxSkills + ' 个）</div>';
+    } else if (c.kind === 'gold') {
+      el.innerHTML =
+        '<div class="ico">' + c.ico + '</div>' +
+        '<div class="nm">' + c.name + '</div>' +
+        '<div class="ds">' + c.desc + '</div>' +
+        '<div class="ph">金币</div>';
+    } else {
+      const def = SKILL_DEFS[c.sk];
+      el.innerHTML =
+        '<div class="ico">' + c.ico + '</div>' +
+        '<div class="nm">' + c.name + '</div>' +
+        '<div class="ds">' + c.desc + '</div>' +
+        '<div class="lv">等级 ' + (c.lv + 1) + ' / ' + c.max + '</div>' +
+        '<div class="skTag">' + def.name + '</div>';
+    }
+    el.addEventListener('click', () => chooseCard(c));
+    box.appendChild(el);
+  }
+}
+function chooseCard(c) {
+  if (c.kind === 'gold') {
+    META.gold += 25; G.goldRun += 25;
+    updateGoldText();
+    toast('¤ 获得 25 金币', 1400);
+    floatText(P.x, P.y - 44, '+25 金币', '#ffd166');
+  } else if (c.kind === 'skill') {
+    learnSkill(c.id);
+    toast('✦ 解锁技能：' + c.name, 1600);
+  } else {
+    const st = P.skills[c.m.sk];
+    if (st) {
+      c.m.apply(st);
+      P.skillLv[c.m.id] = (P.skillLv[c.m.id] || 0) + 1;
+      st.lvl++;
+    }
+  }
+  recalc();
+  G.pendingLevels = Math.max(0, G.pendingLevels - 1);
+  burst(P.x, P.y, '#ffd166', 18, 220, 3.4, 0.6);
+  updateBuffs();
+  if (G.pendingLevels > 0) showCards();
+  else {
+    G.levelUpOpen = false;
+    $('#levelScreen').classList.remove('on');
+    drainModals();
+  }
+}
+
+/* ==========================================================================
+   15.5 Hex Tech 三选一 / 万里挑一
+   ========================================================================== */
+function openHexPick(tier) {
+  G.hexPick = tier;
+  G.hexOptions = hexesOfTier(tier).filter(h => !P.hexTaken[h.id]);
+  if (!G.hexOptions.length) { G.hexPick = null; return; }
+  const t = HEX_TIERS[tier];
+  $('#hexTitle').textContent = t.name + ' HEX TECH';
+  $('#hexTitle').style.color = t.color;
+  $('#hexSub').textContent = '击败精英掉落：从 3 个' + t.name + '选项中选一个';
+  const box = $('#hexBox');
+  box.innerHTML = '';
+  const opts = [];
+  const pool = G.hexOptions.slice();
+  for (let i = 0; i < 3 && pool.length; i++) opts.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  for (const h of opts) {
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.innerHTML =
+      '<div class="tier" style="color:' + t.color + '">' + t.name + '</div>' +
+      '<div class="nm">' + h.name + '</div>' +
+      '<div class="ds">' + h.desc + '</div>';
+    el.addEventListener('click', () => pickHex(h));
+    box.appendChild(el);
+  }
+  G.paused = true;
+  $('#hexScreen').classList.add('on');
+}
+function pickHex(h) {
+  applyHex(h);
+  $('#hexScreen').classList.remove('on');
+  G.hexPick = null;
+  drainModals();
+}
+function openHexPicker() {
+  const list = $('#hexAllList');
+  list.innerHTML = '';
+  for (const tier of ['silver', 'gold', 'prism']) {
+    for (const h of hexesOfTier(tier)) {
+      const row = document.createElement('div');
+      row.className = 'hexRow' + (P.hexTaken[h.id] ? ' owned' : '');
+      row.innerHTML = '<div class="sInfo"><div class="hn" style="color:' + HEX_TIERS[tier].color + '">' +
+        HEX_TIERS[tier].name + ' · ' + h.name + '</div><div class="hd">' + h.desc + '</div></div>';
+      if (!P.hexTaken[h.id]) row.addEventListener('click', () => {
+        applyHex(h);
+        $('#hexAllScreen').classList.remove('on');
+        toast('⬢ 万里挑一：' + h.name, 2000);
+      });
+      list.appendChild(row);
+    }
+  }
+  G.paused = true;
+  $('#hexAllScreen').classList.add('on');
+}
+
+/* ==========================================================================
+   16. 暂停 / 结算 / 商店
+   ========================================================================== */
+function togglePause() {
+  if (!G.running || G.over || G.levelUpOpen) return;
+  G.paused = !G.paused;
+  $('#pauseScreen').classList.toggle('on', G.paused);
+  if (G.paused) {
+    $('#pauseStats').innerHTML =
+      '存活时间：<b>' + fmtTime(G.elapsed) + '</b> ｜ 等级：<b>Lv.' + P.level + '</b>' +
+      ' ｜ 击杀：<b>' + G.kills + '</b> ｜ 本局金币：<b>' + G.goldRun + '</b>';
+    renderPauseDetail();
+  }
+}
+/* 暂停时展示：已学技能的所有词条 + 已获得 Hex 的效果 */
+function renderPauseDetail() {
+  const sk = $('#pauseSkills');
+  sk.innerHTML = '';
+  for (const id of SKILL_ORDER) {
+    const st = P.skills[id];
+    if (!st) continue;
+    const d = SKILL_DEFS[id];
+    const owned = MASTERIES.filter(m => m.sk === id && (P.skillLv[m.id] || 0) > 0);
+    const box = document.createElement('div');
+    box.className = 'pSk';
+    let html = '<div class="pSkName">' + d.ico + ' ' + d.name + ' <span class="pNone">（词条 ' + st.lvl + '）</span></div>' +
+      '<div class="pSkDesc">' + d.desc + '</div>';
+    if (!owned.length) html += '<div class="pNone">尚未选择词条</div>';
+    for (const m of owned) {
+      const lv = P.skillLv[m.id];
+      html += '<div class="pMod">' + m.name + ' <b>' + lv + '/' + m.max + '</b> — ' + m.desc + '</div>';
+    }
+    box.innerHTML = html;
+    sk.appendChild(box);
+  }
+  if (!sk.children.length) sk.innerHTML = '<div class="pNone">还没有技能</div>';
+
+  const hx = $('#pauseHexes');
+  hx.innerHTML = '';
+  if (!P.hexes.length) hx.innerHTML = '<div class="pNone">还没有获得 Hex Tech</div>';
+  for (const id of P.hexes) {
+    const h = HEX_BY_ID[id];
+    if (!h) continue;
+    const tier = HEX_TIERS[h.tier];
+    const el = document.createElement('div');
+    el.className = 'pHex';
+    el.innerHTML = '<b style="color:' + tier.color + '">[' + tier.name + '] ' + h.name + '</b><br><span>' + h.desc + '</span>';
+    hx.appendChild(el);
+  }
+  // 伤害统计
+  const dm = $('#pauseDmg');
+  if (dm) dm.innerHTML = dmgStatHTML();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && G.running && !G.paused && !G.levelUpOpen && !G.over) togglePause();
+});
+
+function endRun(win) {
+  if (G.over) return;
+  G.over = true; G.win = !!win; G.running = false; G.paused = true;
+  META.runs++;
+  if (G.elapsed > META.best) META.best = G.elapsed;
+  if (win) META.wins = (META.wins || 0) + 1;
+  saveMeta();
+  $('#overTitle').textContent = win ? '胜 利 ！' : '你 死 了';
+  $('#overTitle').style.background = win
+    ? 'linear-gradient(90deg,#9fe4ff,#ffd166,#7fffb0)'
+    : 'linear-gradient(90deg,#ff6b8f,#ffd166)';
+  $('#overTitle').style.webkitBackgroundClip = 'text';
+  $('#overScreen').classList.add('on');
+  $('#overStats').innerHTML =
+    '存活时间：<b>' + fmtTime(G.elapsed) + '</b> ｜ 等级：<b>Lv.' + P.level + '</b><br>' +
+    '击杀：<b>' + G.kills + '</b> ｜ 本局金币：<b>' + G.goldRun + '</b>（已计入永久金币）<br>' +
+    '永久金币总计：<b>' + META.gold + '</b> ｜ 最佳记录：<b>' + fmtTime(META.best) + '</b><br>' +
+    '总伤害：<b>' + Math.round(dmgTotal()).toLocaleString() + '</b>';
+  $('#overDmg').innerHTML = dmgStatHTML();
+  if (win) burst(P.x, P.y, '#ffd166', 90, 420, 6, 1.6);
+}
+
+/* ---- 商店 ---- */
+function renderShop() {
+  const list = $('#shopList');
+  list.innerHTML = '';
+  for (const u of META_UPGRADES) {
+    const lv = (META.up && META.up[u.id]) || 0;
+    const maxed = lv >= u.vals.length;
+    const cost = upgradeCost(u, lv);
+    const cur = lv > 0 ? u.fmt(u.vals[lv - 1]) : '无';
+    const nxt = maxed ? '已满级' : '下一级 ' + u.fmt(u.vals[lv]);
+    const row = document.createElement('div');
+    row.className = 'shopRow';
+    row.innerHTML =
+      '<div class="sInfo"><div class="sName">' + u.name + ' <span class="sLv">Lv.' + lv + ' / ' + u.vals.length + '</span></div>' +
+      '<div class="sDesc">当前：' + cur + '<br>' + nxt + '</div></div>';
+    const btn = document.createElement('button');
+    btn.className = 'sBuy';
+    btn.textContent = maxed ? '已满级' : cost + ' 金币';
+    btn.disabled = maxed;
+    btn.addEventListener('click', () => {
+      if (maxed) return;
+      if (META.gold < cost) { toast('金币不足，还差 ' + (cost - META.gold) + ' 枚', 1400); return; }
+      META.gold -= cost;
+      META.up[u.id] = lv + 1;
+      saveMeta();
+      renderShop();
+      updateGoldText();
+      $('#shopGold').textContent = META.gold;
+    });
+    row.appendChild(btn);
+    list.appendChild(row);
+  }
+  $('#shopGold').textContent = META.gold;
+  const fc = $('#fishCount');
+  if (fc) fc.textContent = '已购买 ' + (META.fish || 0) + ' 条';
+  renderFire();
+}
+/* 添火：通关一次后解锁，可自选开局诅咒层数 */
+function renderFire() {
+  const unlocked = (META.wins || 0) > 0;
+  const box = $('#fireBox');
+  box.classList.toggle('locked', !unlocked);
+  const cur = META.startCurse || 0;
+  $('#fireLv').textContent = unlocked ? ('初始诅咒 ' + cur + ' / 10') : '未解锁（需通关一次）';
+  $('#fireDesc').textContent = unlocked
+    ? '自选每局开局携带的诅咒：每点诅咒使经验/金币掉落 +10%，怪物血量/数量/攻击 +5%。'
+    : '通关一次后解锁。可自选每局开局携带的诅咒层数。';
+  $('#btnFireMinus').disabled = !unlocked || cur <= 0;
+  $('#btnFirePlus').disabled = !unlocked || cur >= 10;
+}
+function setFire(delta) {
+  if (!(META.wins > 0)) { toast('需要先通关一次才能解锁「添火」', 1600); return; }
+  const cur = META.startCurse || 0;
+  META.startCurse = clamp(cur + delta, 0, 10);
+  saveMeta(); renderFire();
+}
+/* 小鱼干：纯趣味事件，无任何实际效果 */
+function buyFish(n) {
+  const cnt = n || 1;
+  const cost = 100 * cnt;
+  if (META.gold < cost) { toast('金币不足，还差 ' + (cost - META.gold) + ' 枚', 1400); return; }
+  META.gold -= cost;
+  META.fish = (META.fish || 0) + cnt;
+  saveMeta();
+  renderShop();
+  updateGoldText();
+  toast('🐟 喵喵之神会祝你好运！本次买了 ' + cnt + ' 条（累计 ' + META.fish + ' 条）', 2200);
+}
+function openShop() { renderShop(); $('#shopScreen').classList.add('on'); }
+function closeShop() { $('#shopScreen').classList.remove('on'); refreshMenuText(); }
+function refreshMenuText() {
+  $('#startGold').textContent = META.gold;
+  let total = 0;
+  for (const u of META_UPGRADES) total += Math.min((META.up && META.up[u.id]) || 0, u.vals.length);
+  $('#startBest').innerHTML =
+    '最佳存活：<b>' + fmtTime(META.best) + '</b> ｜ 已挑战 <b>' + META.runs + '</b> 局 ｜ 通关 <b>' + (META.wins || 0) + '</b> 次<br>' +
+    ((META.wins > 0) ? '🔥 添火已解锁：开局诅咒 <b>' + (META.startCurse || 0) + '</b><br>' : '') +
+    '已购永久强化：<b>' + total + '</b> / ' + (META_UPGRADES.length * 5) + ' 级';
+}
+
+/* ==========================================================================
+   17. UI 事件绑定
+   ========================================================================== */
+function startGame() {
+  $('#startScreen').classList.remove('on');
+  $('#overScreen').classList.remove('on');
+  $('#pauseScreen').classList.remove('on');
+  $('#levelScreen').classList.remove('on');
+  resetGame();
+}
+/* 返回主页（结算界面） */
+function backHome() {
+  $('#overScreen').classList.remove('on');
+  $('#pauseScreen').classList.remove('on');
+  G.running = false; G.paused = false; G.over = false;
+  refreshMenuText();
+  $('#startScreen').classList.add('on');
+}
+$('#btnStart').addEventListener('click', startGame);
+$('#btnAgain').addEventListener('click', startGame);
+$('#btnResume').addEventListener('click', togglePause);
+$('#btnPause').addEventListener('click', togglePause);
+function toggleSpeed2() {
+  if (!G.running || G.over) return;
+  G.speed2 = !G.speed2;
+  $('#btnSpeed').classList.toggle('on', G.speed2);
+  $('#btnSpeed').textContent = G.speed2 ? '2× 速度 · 开' : '2× 速度 (F)';
+  toast(G.speed2 ? '⏩ 已切换到 2 倍速' : '▶ 恢复正常速度', 1100);
+}
+$('#btnSpeed').addEventListener('click', toggleSpeed2);
+$('#btnQuit').addEventListener('click', () => {
+  $('#pauseScreen').classList.remove('on');
+  endRun(false);
+});
+$('#btnSkill').addEventListener('click', (e) => { e.preventDefault(); castActive('blink'); });
+$('#btnFly').addEventListener('click', (e) => { e.preventDefault(); castActive('fly'); });
+$('#btnCoin').addEventListener('click', (e) => { e.preventDefault(); castActive('coin'); });
+$('#btnShopFromStart').addEventListener('click', openShop);
+$('#btnShopFromOver').addEventListener('click', openShop);
+$('#btnShopBack').addEventListener('click', closeShop);
+$('#btnFish').addEventListener('click', () => buyFish(1));
+$('#btnFish10').addEventListener('click', () => buyFish(10));
+$('#btnFireMinus').addEventListener('click', () => setFire(-1));
+$('#btnFirePlus').addEventListener('click', () => setFire(1));
+$('#btnHome').addEventListener('click', backHome);
+$('#btnReset').addEventListener('click', () => {
+  if (confirm('确定要清空永久金币与所有局外升级吗？')) {
+    META = { gold: 0, up: {}, best: 0, runs: 0 };
+    saveMeta(); refreshMenuText(); renderShop(); updateGoldText();
+    toast('存档已重置', 1200);
+  }
+});
+
+/* ==========================================================================
+   18. 启动
+   ========================================================================== */
+loadMeta();
+resetPlayer();
+refreshMenuText();
+updateHUD();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
